@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</ProjectGuid>
+    <RootNamespace>JediSurvivorTweaks</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <TargetExt>.asi</TargetExt>
+    <TargetName>JediSurvivorTweaks</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <TargetExt>.asi</TargetExt>
+    <TargetName>JediSurvivorTweaks</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;_DEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\external;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/FS /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+      <!-- ASI plugin; nothing imports from us, so skip the .lib/.exp pair. -->
+      <AdditionalOptions>/NOIMPLIB /NOEXP %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;NDEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\external;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/FS /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+      <!-- ASI plugin; nothing imports from us, so skip the .lib/.exp pair. -->
+      <AdditionalOptions>/NOIMPLIB /NOEXP %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\core\config.cpp" />
+    <ClCompile Include="src\core\hook_engine.cpp" />
+    <ClCompile Include="src\core\logging.cpp" />
+    <ClCompile Include="src\core\memory_scanner.cpp" />
+    <ClCompile Include="src\core\cvar_resolver.cpp" />
+    <ClCompile Include="src\core\cvar_scanner.cpp" />
+    <ClCompile Include="src\core\cvar_system.cpp" />
+    <ClCompile Include="src\core\pe_utils.cpp" />
+    <ClCompile Include="src\hooks\hook_context.cpp" />
+    <ClCompile Include="src\tweaks\hook_tweak.cpp" />
+    <ClCompile Include="src\tweaks\tweak_manager.cpp" />
+    <ClCompile Include="src\tweaks\letterbox_pillarbox_fix.cpp" />
+    <ClCompile Include="src\tweaks\gameplay_fov.cpp" />
+    <ClCompile Include="src\tweaks\camera_distance.cpp" />
+    <ClCompile Include="src\tweaks\aspect_ratio_ui_fix.cpp" />
+    <ClCompile Include="src\tweaks\graphical_tweaks.cpp" />
+    <ClCompile Include="src\tweaks\interpolated_rendering.cpp" />
+    <ClCompile Include="src\tweaks\custom_cvars.cpp" />
+    <ClCompile Include="src\external\hde64\hde64.c">
+      <!-- Vendored disassembler: keep its baseline warning level so upstream
+           noise doesn't pollute our W4 build. -->
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\core\config.hpp" />
+    <ClInclude Include="src\core\cvar_overrides.hpp" />
+    <ClInclude Include="src\core\cvar_resolver.hpp" />
+    <ClInclude Include="src\core\cvar_scanner.hpp" />
+    <ClInclude Include="src\core\cvar_system.hpp" />
+    <ClInclude Include="src\core\hook_engine.hpp" />
+    <ClInclude Include="src\core\logging.hpp" />
+    <ClInclude Include="src\core\memory_scanner.hpp" />
+    <ClInclude Include="src\core\pe_types.hpp" />
+    <ClInclude Include="src\core\pe_utils.hpp" />
+    <ClInclude Include="src\core\string_utils.hpp" />
+    <ClInclude Include="src\hooks\hook_context.hpp" />
+    <ClInclude Include="src\hooks\tweak_hooks.hpp" />
+    <ClInclude Include="src\tweaks\tweak.hpp" />
+    <ClInclude Include="src\tweaks\tweak_manager.hpp" />
+    <ClInclude Include="src\tweaks\hook_tweak.hpp" />
+    <ClInclude Include="src\tweaks\letterbox_pillarbox_fix.hpp" />
+    <ClInclude Include="src\tweaks\gameplay_fov.hpp" />
+    <ClInclude Include="src\tweaks\camera_distance.hpp" />
+    <ClInclude Include="src\tweaks\aspect_ratio_ui_fix.hpp" />
+    <ClInclude Include="src\tweaks\graphical_tweaks.hpp" />
+    <ClInclude Include="src\tweaks\interpolated_rendering.hpp" />
+    <ClInclude Include="src\tweaks\custom_cvars.hpp" />
+    <ClInclude Include="src\external\hde64\hde64.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="src\hooks\tweak_hooks.asm" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="config\JediSurvivorTweaks.ini" />
+    <None Include="README.md" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
+  </ImportGroup>
+</Project>
