@@ -58,8 +58,20 @@ not_1111:
 AspectRatioUIFix_Detour ENDP
 
 ; ---------------------------------------------------------------------------
-; LetterboxPillarboxFix - removes pillarboxing/letterboxing by disabling aspect ratio
-; constraint checks.
+; LetterboxPillarboxFix - removes pillarboxing/letterboxing by disabling the
+; aspect-ratio constraint flag in the render context.
+;
+; Replaces the three-instruction sequence at kOffset=0x0F (15 bytes total):
+;   mov eax,  [rbx+02BCh]     (6) -- copy display width to render ctx
+;   mov [rdi+030h], eax       (3) -- write to render ctx
+;   mov eax,  [rbx+02C8h]     (6) -- read constraint flag (we override this)
+;
+; The detour emulates the first two instructions verbatim, then instead of
+; reading the flag it clears it in game memory and returns zero in eax.
+; Writing the flag to 0 ensures that code paths not covered by this hook
+; (e.g. the UI renderer reading [rbx+02C8h] directly) also see a disabled
+; constraint after the first invocation -- this prevents FPS drops when the
+; game menu or HUD is opened after a cutscene has activated the flag.
 ; ---------------------------------------------------------------------------
 LetterboxPillarboxFix_Detour PROC PUBLIC
     sub rsp, 8                      ; reserve slot for resume address
@@ -70,10 +82,10 @@ LetterboxPillarboxFix_Detour PROC PUBLIC
     mov rcx, qword ptr [r11 + 0]
     mov qword ptr [rsp + 16], rcx   ; store resume address in the reserved slot
 
-    mov eax, [rbx + 02BCh]
-    mov [rdi + 030h], eax
-    movzx eax, byte ptr [rbx + 02C8h]
-    mov eax, 0
+    mov eax, [rbx + 02BCh]          ; replicate: copy display width
+    mov [rdi + 030h], eax           ; replicate: write to render context
+    mov dword ptr [rbx + 02C8h], 0  ; clear constraint flag in game memory
+    mov eax, 0                      ; return zero (no constraint) in eax
 
     pop rcx                         ; restore rcx
     pop r11                         ; restore r11
