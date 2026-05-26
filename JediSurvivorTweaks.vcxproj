@@ -9,6 +9,10 @@
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="ReleaseAddon|x64">
+      <Configuration>ReleaseAddon</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
@@ -31,6 +35,13 @@
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAddon|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
     <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
@@ -43,6 +54,9 @@
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='ReleaseAddon|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <TargetExt>.asi</TargetExt>
@@ -50,6 +64,10 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <TargetExt>.asi</TargetExt>
+    <TargetName>JediSurvivorTweaks</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAddon|x64'">
+    <TargetExt>.addon64</TargetExt>
     <TargetName>JediSurvivorTweaks</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -92,8 +110,43 @@
       <AdditionalOptions>/NOIMPLIB /NOEXP %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAddon|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;NDEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\external;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/FS /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+      <!-- ReShade addon: nothing imports from us, skip .lib/.exp. -->
+      <AdditionalOptions>/NOIMPLIB /NOEXP %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\entry_asi.cpp">
+      <!-- ASI entry-point: built into Debug/Release; excluded from ReleaseAddon
+           (the ReShade addon variant has its own entry point). -->
+      <ExcludedFromBuild Condition="'$(Configuration)'=='ReleaseAddon'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\reshade\entry.cpp">
+      <!-- ReShade addon entry-point: built only into ReleaseAddon. -->
+      <ExcludedFromBuild Condition="'$(Configuration)'!='ReleaseAddon'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\reshade\overlay.cpp">
+      <!-- ImGui overlay: built only into ReleaseAddon. -->
+      <ExcludedFromBuild Condition="'$(Configuration)'!='ReleaseAddon'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\main_app.cpp" />
     <ClCompile Include="src\core\config.cpp" />
     <ClCompile Include="src\core\hook_engine.cpp" />
     <ClCompile Include="src\core\logging.cpp" />
@@ -119,7 +172,9 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\main_app.hpp" />
     <ClInclude Include="src\core\config.hpp" />
+    <ClInclude Include="src\core\ini_helpers.hpp" />
     <ClInclude Include="src\core\cvar_overrides.hpp" />
     <ClInclude Include="src\core\cvar_resolver.hpp" />
     <ClInclude Include="src\core\cvar_scanner.hpp" />
@@ -132,6 +187,7 @@
     <ClInclude Include="src\core\string_utils.hpp" />
     <ClInclude Include="src\hooks\hook_context.hpp" />
     <ClInclude Include="src\hooks\tweak_hooks.hpp" />
+    <ClInclude Include="src\tweaks\runtime_control.hpp" />
     <ClInclude Include="src\tweaks\tweak.hpp" />
     <ClInclude Include="src\tweaks\tweak_manager.hpp" />
     <ClInclude Include="src\tweaks\hook_tweak.hpp" />
@@ -143,6 +199,16 @@
     <ClInclude Include="src\tweaks\interpolated_rendering.hpp" />
     <ClInclude Include="src\tweaks\custom_cvars.hpp" />
     <ClInclude Include="src\external\hde64\hde64.h" />
+    <ClInclude Include="src\reshade\overlay.hpp" />
+    <ClInclude Include="src\external\reshade\imgui_compat.hpp" />
+    <ClInclude Include="src\external\reshade\reshade.hpp" />
+    <ClInclude Include="src\external\reshade\reshade_api.hpp" />
+    <ClInclude Include="src\external\reshade\reshade_api_device.hpp" />
+    <ClInclude Include="src\external\reshade\reshade_api_format.hpp" />
+    <ClInclude Include="src\external\reshade\reshade_api_pipeline.hpp" />
+    <ClInclude Include="src\external\reshade\reshade_api_resource.hpp" />
+    <ClInclude Include="src\external\reshade\reshade_events.hpp" />
+    <ClInclude Include="src\external\reshade\reshade_overlay.hpp" />
   </ItemGroup>
   <ItemGroup>
     <MASM Include="src\hooks\tweak_hooks.asm" />

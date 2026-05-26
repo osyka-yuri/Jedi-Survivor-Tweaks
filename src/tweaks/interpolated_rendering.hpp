@@ -18,8 +18,11 @@ public:
     void Shutdown() override;
     [[nodiscard]] bool IsInitialized() const override { return m_initialized; }
 
+    [[nodiscard]] std::vector<RuntimeControl> GetRuntimeControls() override;
+
 private:
     bool m_initialized = false;
+    bool m_irEnabled   = true;      // loaded from config in Initialize; mutated by overlay
 };
 
 } // namespace jst::tweaks

@@ -18,8 +18,16 @@ public:
     void Shutdown() override;
     [[nodiscard]] bool IsInitialized() const override { return m_initialized; }
 
+    [[nodiscard]] std::vector<RuntimeControl> GetRuntimeControls() override;
+
 private:
-    bool m_initialized = false;
+    // All m_*Enabled fields are loaded from config in Initialize (defaulting
+    // to true) and mutated by the runtime overlay sliders/checkboxes.
+    bool  m_initialized     = false;
+    bool  m_sharpenEnabled  = true;
+    float m_sharpenStrength = 1.0f;
+    bool  m_caEnabled       = true;
+    bool  m_vignetteEnabled = true;
 };
 
 } // namespace jst::tweaks

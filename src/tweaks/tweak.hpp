@@ -1,8 +1,10 @@
 #pragma once
 
+#include "runtime_control.hpp"
 #include <string>
 #include <string_view>
 #include <expected>
+#include <vector>
 
 namespace jst::core {
     class Config;
@@ -42,6 +44,13 @@ public:
 
     // State query
     [[nodiscard]] virtual bool IsInitialized() const = 0;
+
+    /// Optional: report mutable runtime controls for an overlay. Default:
+    /// no controls. Called at most once per overlay frame; safe to allocate.
+    /// Controls whose `apply` callbacks mutate runtime state are called from
+    /// the render thread -- all current apply targets (context multipliers,
+    /// CVar calls) are render-thread-safe.
+    [[nodiscard]] virtual std::vector<RuntimeControl> GetRuntimeControls() { return {}; }
 };
 
 } // namespace jst::tweaks

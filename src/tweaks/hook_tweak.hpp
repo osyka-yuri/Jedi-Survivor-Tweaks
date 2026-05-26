@@ -64,6 +64,8 @@ public:
     [[nodiscard]] std::string_view Description() const override { return m_description; }
     [[nodiscard]] bool IsEnabledByDefault() const override { return m_enabledByDefault; }
 
+    [[nodiscard]] std::vector<RuntimeControl> GetRuntimeControls() override;
+
 protected:
     virtual void OnConfigLoaded(jst::core::Config& /*config*/) {}
     virtual void OnHookResolved(const jst::hooks::Context& /*context*/) {}
@@ -71,7 +73,8 @@ protected:
     [[nodiscard]] jst::hooks::Context& GetContext() const { return jst::hooks::GetContext(m_slot); }
 
     // Last value loaded by the standard MultiplierConfig path. 0.0f if no
-    // MultiplierConfig was provided.
+    // MultiplierConfig was provided.  Updated by the runtime slider so that
+    // re-enabling the tweak restores the user's current slider position.
     [[nodiscard]] float LoadedMultiplier() const noexcept { return m_loadedMultiplier; }
 
 private:
@@ -87,8 +90,9 @@ private:
     jst::hooks::Slot m_slot;
     std::optional<MultiplierConfig> m_multiplierCfg;
     float m_loadedMultiplier = 0.0f;
-    bool m_enabledByDefault = false;
-    bool m_initialized = false;
+    bool  m_configEnabled;               // mirrors [TweakName] Enabled in .ini
+    bool  m_enabledByDefault = false;
+    bool  m_initialized      = false;
 };
 
 } // namespace jst::tweaks

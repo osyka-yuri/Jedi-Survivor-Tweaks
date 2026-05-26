@@ -1,39 +1,25 @@
 #include "config.hpp"
+#include "ini_helpers.hpp"
 #include "logging.hpp"
 
-#include <algorithm>
-#include <array>
 #include <charconv>
+#include <format>
 #include <fstream>
-#include <ranges>
-#include <string_view>
+#include <map>
+#include <set>
 
 namespace jst::core {
 
-namespace {
-    constexpr std::array<std::string_view, 6> kFalseLiterals{
-        "0", "false", "False", "FALSE", "no", "No"
-    };
-    constexpr std::array<std::string_view, 6> kTrueLiterals{
-        "1", "true", "True", "TRUE", "yes", "Yes"
-    };
+using jst::core::detail::Trim;
+using jst::core::detail::MatchesAny;
+using jst::core::detail::kFalseLiterals;
+using jst::core::detail::kTrueLiterals;
 
-    template <std::ranges::input_range R>
-    constexpr bool MatchesAny(std::string_view sv, const R& set) {
-        return std::ranges::find(set, sv) != std::ranges::end(set);
-    }
-
-    constexpr std::string_view Trim(std::string_view sv) {
-        const auto start = sv.find_first_not_of(" \t\r\n");
-        if (start == std::string_view::npos) return {};
-        const auto end = sv.find_last_not_of(" \t\r\n");
-        return sv.substr(start, end - start + 1);
-    }
-} // anonymous namespace
-
-bool Config::Load(const std::filesystem::path& path) {
+bool Config::Load(const std::filesystem::path& path, SaveMode mode) {
     m_path = path;
+    m_saveMode = mode;
     m_cache.clear();
+    m_rawLines.clear();
 
     std::ifstream file(path);
     if (!file.is_open()) {
@@ -41,9 +27,16 @@ bool Config::Load(const std::filesystem::path& path) {
         return false;
     }
 
+    const bool captureRaw = (mode == SaveMode::PreserveComments);
+
     std::string currentSection;
     std::string line;
     while (std::getline(file, line)) {
+        // Strip trailing CR so rawLines (if captured) store clean text
+        // regardless of line-ending style.
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (captureRaw) m_rawLines.push_back(line);
+
         const std::string_view sv = Trim(line);
         if (sv.empty() || sv[0] == ';' || sv[0] == '#') continue;
 
@@ -74,7 +67,7 @@ bool Config::Load(const std::filesystem::path& path) {
 
 bool Config::Reload() {
     if (m_path.empty()) return false;
-    const bool res = Load(m_path);
+    const bool res = Load(m_path, m_saveMode);
     if (res) JST_LOG_INFO("Config reloaded.");
     return res;
 }
@@ -111,8 +104,8 @@ float Config::GetFloat(std::string_view section, std::string_view key, float def
 bool Config::GetBool(std::string_view section, std::string_view key, bool defaultValue) const {
     const auto raw = GetRawOpt(section, key);
     if (!raw) return defaultValue;
-    if (MatchesAny(*raw, kFalseLiterals)) return false;
-    if (MatchesAny(*raw, kTrueLiterals))  return true;
+    if (detail::MatchesAny(*raw, detail::kFalseLiterals)) return false;
+    if (detail::MatchesAny(*raw, detail::kTrueLiterals))  return true;
     return defaultValue;
 }
 
@@ -123,6 +116,185 @@ bool Config::HasSection(std::string_view section) const {
 const Config::Section* Config::GetSection(std::string_view section) const {
     const auto it = m_cache.find(section);
     return it == m_cache.end() ? nullptr : &it->second;
+}
+
+void Config::SetString(std::string_view section, std::string_view key, std::string value) {
+    m_cache[std::string(section)][std::string(key)] = std::move(value);
+}
+
+void Config::SetFloat(std::string_view section, std::string_view key, float value) {
+    SetString(section, key, std::format("{:.6g}", value));
+}
+
+void Config::SetInt(std::string_view section, std::string_view key, int value) {
+    SetString(section, key, std::to_string(value));
+}
+
+void Config::SetBool(std::string_view section, std::string_view key, bool value) {
+    SetString(section, key, value ? "true" : "false");
+}
+
+bool Config::Save() {
+    if (m_path.empty()) return false;
+
+    const auto tmpPath = m_path.parent_path() / (m_path.filename().string() + ".tmp");
+    const bool wrote = (m_saveMode == SaveMode::PreserveComments)
+                           ? SavePreserveComments(tmpPath)
+                           : SaveDeterministic(tmpPath);
+    if (!wrote) {
+        std::error_code rmEc;
+        std::filesystem::remove(tmpPath, rmEc);  // best-effort orphan cleanup
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::rename(tmpPath, m_path, ec);
+    if (ec) {
+        JST_LOG_ERROR("Config::Save: rename failed: {}.", ec.message());
+        std::error_code rmEc;
+        std::filesystem::remove(tmpPath, rmEc);
+        return false;
+    }
+    JST_LOG_INFO("Config saved: '{}'.", m_path.string());
+    return true;
+}
+
+bool Config::SavePreserveComments(const std::filesystem::path& tmpPath) const {
+    // Pre-scan rawLines to build the set of (section, key) pairs already
+    // present, so we know what is new and needs to be appended.
+    std::map<std::string, std::set<std::string>> inRaw;
+    {
+        std::string sec;
+        for (const auto& rawLine : m_rawLines) {
+            const auto sv = Trim(rawLine);
+            if (sv.size() >= 2 && sv.front() == '[' && sv.back() == ']') {
+                sec = std::string(Trim(sv.substr(1, sv.size() - 2)));
+            } else if (!sv.empty() && sv[0] != ';' && sv[0] != '#') {
+                const auto eq = sv.find('=');
+                if (eq != std::string_view::npos) {
+                    auto k = std::string(Trim(sv.substr(0, eq)));
+                    if (!k.empty()) inRaw[sec].insert(k);
+                }
+            }
+        }
+    }
+
+    std::vector<std::string> output;
+    output.reserve(m_rawLines.size() + 16);
+    std::string currentSection;
+
+    // Append any cache keys for `section` not yet emitted to output.
+    auto appendPendingKeys = [&](std::string_view section) {
+        auto sit = m_cache.find(section);
+        if (sit == m_cache.end()) return;
+        for (const auto& [k, v] : sit->second) {
+            const std::string secStr(section);
+            if (!inRaw[secStr].count(k)) {
+                output.push_back(k + " = " + v);
+                inRaw[secStr].insert(k);
+            }
+        }
+    };
+
+    for (const auto& rawLine : m_rawLines) {
+        const auto sv = Trim(rawLine);
+
+        // Section header: flush pending keys for the outgoing section first.
+        if (sv.size() >= 2 && sv.front() == '[' && sv.back() == ']') {
+            appendPendingKeys(currentSection);
+            currentSection = std::string(Trim(sv.substr(1, sv.size() - 2)));
+            output.push_back(rawLine);
+            continue;
+        }
+
+        // Key = value line: replace with cached value if present.
+        if (!sv.empty() && sv[0] != ';' && sv[0] != '#') {
+            const auto eq = sv.find('=');
+            if (eq != std::string_view::npos) {
+                auto key = std::string(Trim(sv.substr(0, eq)));
+                if (!key.empty()) {
+                    auto sit = m_cache.find(currentSection);
+                    if (sit != m_cache.end()) {
+                        auto kit = sit->second.find(key);
+                        if (kit != sit->second.end()) {
+                            // Build the updated line, preserving any inline
+                            // comment that appeared after the value in the
+                            // original file (e.g. "; 0.0-10.0 (default)").
+                            std::string newLine = key + " = " + kit->second;
+                            const auto rawEqOfs = rawLine.find('=');
+                            if (rawEqOfs != std::string::npos) {
+                                const auto cmtOfs =
+                                    rawLine.find_first_of(";#", rawEqOfs + 1);
+                                if (cmtOfs != std::string::npos) {
+                                    newLine += "  ";
+                                    newLine += rawLine.substr(cmtOfs);
+                                }
+                            }
+                            output.push_back(std::move(newLine));
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Comment, blank line, or unrecognised entry: preserve as-is.
+        output.push_back(rawLine);
+    }
+
+    // Flush any pending keys for the final section in the file.
+    appendPendingKeys(currentSection);
+
+    // Append entirely new sections (not present anywhere in rawLines).
+    for (const auto& [sec, secMap] : m_cache) {
+        bool hasNew = false;
+        for (const auto& [k, v] : secMap) {
+            if (!inRaw[sec].count(k)) { hasNew = true; break; }
+        }
+        if (!hasNew) continue;
+        output.push_back("");
+        output.push_back("[" + sec + "]");
+        for (const auto& [k, v] : secMap) {
+            if (!inRaw[sec].count(k)) {
+                output.push_back(k + " = " + v);
+                inRaw[sec].insert(k);
+            }
+        }
+    }
+
+    std::ofstream out(tmpPath, std::ios::out | std::ios::trunc);
+    if (!out.is_open()) {
+        JST_LOG_ERROR("Config::Save: cannot open temp file '{}'.", tmpPath.string());
+        return false;
+    }
+    for (const auto& ln : output) {
+        out << ln << '\n';
+    }
+    if (!out) {
+        JST_LOG_ERROR("Config::Save: write error on '{}'.", tmpPath.string());
+        return false;
+    }
+    return true;
+}
+
+bool Config::SaveDeterministic(const std::filesystem::path& tmpPath) const {
+    std::ofstream out(tmpPath, std::ios::out | std::ios::trunc);
+    if (!out.is_open()) {
+        JST_LOG_ERROR("Config::Save: cannot open temp file '{}'.", tmpPath.string());
+        return false;
+    }
+    for (const auto& [sec, secMap] : m_cache) {
+        out << '[' << sec << ']' << '\n';
+        for (const auto& [k, v] : secMap) {
+            out << k << " = " << v << '\n';
+        }
+        out << '\n';
+    }
+    if (!out) {
+        JST_LOG_ERROR("Config::Save: write error on '{}'.", tmpPath.string());
+        return false;
+    }
+    return true;
 }
 
 } // namespace jst::core
