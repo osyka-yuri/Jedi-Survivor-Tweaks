@@ -80,6 +80,12 @@ std::expected<size_t, std::string> TweakManager::Initialize(core::HookEngine& ho
     return enabledCount;
 }
 
+void TweakManager::IterateTweaks(std::function<void(ITweak&)> visitor) const {
+    for (const auto& tweak : m_tweaks) {
+        visitor(*tweak);
+    }
+}
+
 void TweakManager::Shutdown() {
     if (!m_initialized) return;
 

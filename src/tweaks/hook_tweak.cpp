@@ -17,9 +17,13 @@ HookTweak::HookTweak(std::string name, std::string description, bool enabledByDe
       m_detour(detour),
       m_slot(slot),
       m_multiplierCfg(std::move(multiplierCfg)),
+      m_configEnabled(enabledByDefault),      // overwritten in Initialize if called
       m_enabledByDefault(enabledByDefault) {}
 
 std::expected<void, std::string> HookTweak::Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) {
+    // Sync the in-memory config-enabled flag so GetRuntimeControls() shows the
+    // current .ini value even for initialized tweaks.
+    m_configEnabled = config.GetBool(m_name, "Enabled", m_enabledByDefault);
     OnConfigLoaded(config);
 
     // Standard multiplier path: clamp the configured float and stamp it into
@@ -74,6 +78,55 @@ void HookTweak::ApplyResolution(std::uintptr_t resumeAddress) {
                      m_loadedMultiplier, resumeAddress);
     }
     OnHookResolved(context);
+}
+
+std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
+    std::vector<RuntimeControl> controls;
+    // Upper bound on what this base impl emits: enable checkbox + (optional)
+    // label separator + multiplier slider. Reserving up-front turns the
+    // per-frame push_back doublings into a single allocation.
+    controls.reserve(3);
+
+    // Pre-launch toggle: writes [TweakName] Enabled to .ini. The hook itself
+    // can't be installed/uninstalled at runtime (the trampoline arena is
+    // sealed after HookEngine::InstallAll), so this checkbox is honestly a
+    // "next launch" setting. The renamed label + retitled tooltip make that
+    // visible without requiring the user to hover.
+    controls.push_back(CheckboxControl{
+        .label         = "Load on launch",
+        .current       = m_configEnabled,
+        .defaultValue  = m_enabledByDefault,
+        .apply         = [this](bool v) { m_configEnabled = v; },
+        .configSection = m_name,
+        .configKey     = "Enabled",
+        .tooltip       = "Persists [<TweakName>] Enabled to the .ini. Takes effect on next "
+                         "game launch. The runtime slider below (if present) is the way to "
+                         "change behaviour immediately while playing.",
+    });
+
+    // Runtime multiplier slider -- only available when the hook is installed.
+    if (m_multiplierCfg && m_initialized) {
+        const auto& cfg = *m_multiplierCfg;
+        // Visual cue separating the "next launch" toggle above from the
+        // immediate-effect slider below.
+        controls.push_back(LabelControl{ .label = "Live below \xe2\x86\x93" });  // ↓ (U+2193)
+        controls.push_back(SliderFloatControl{
+            .label         = cfg.configKey,
+            .min           = cfg.clampMin,
+            .max           = cfg.clampMax,
+            .current       = m_loadedMultiplier,
+            .defaultValue  = cfg.defaultValue,
+            .apply         = [this](float v) {
+                m_loadedMultiplier = v;
+                GetContext().multiplier = v;
+            },
+            .configSection = m_name,
+            .configKey     = cfg.configKey,
+            .tooltip       = "Multiplier applied at runtime. Takes effect immediately.",
+        });
+    }
+
+    return controls;
 }
 
 void HookTweak::Shutdown() {

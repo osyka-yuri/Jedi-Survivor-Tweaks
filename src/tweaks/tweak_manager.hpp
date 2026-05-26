@@ -2,6 +2,7 @@
 
 #include "tweak.hpp"
 #include "core/logging.hpp"
+#include <functional>
 #include <memory>
 #include <vector>
 #include <algorithm>
@@ -39,6 +40,12 @@ public:
     }
 
     [[nodiscard]] size_t GetTweakCount() const { return m_tweaks.size(); }
+
+    /// Visit every registered tweak in registration order. The visitor
+    /// receives a non-const reference so it can call non-const methods such
+    /// as GetRuntimeControls(). Mutations to runtime state should go through
+    /// the RuntimeControl callbacks, not the tweak object directly.
+    void IterateTweaks(std::function<void(ITweak&)> visitor) const;
 
 private:
     std::vector<std::unique_ptr<ITweak>> m_tweaks;
