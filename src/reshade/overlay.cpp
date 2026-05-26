@@ -124,20 +124,9 @@ namespace {
                 ShowTooltipIfAny(c.tooltip);
                 return changed;
             } else if constexpr (std::is_same_v<T, jst::tweaks::CheckboxControl>) {
-                ImGui::AlignTextToFramePadding();
-                TextSv(c.label);
-                ShowTooltipIfAny(c.tooltip);
-
-                // Right-align the checkbox to the panel's right edge, mirroring
-                // the per-tweak Reset button. This guarantees no overlap with
-                // the label regardless of label length -- the labelWidth column
-                // is irrelevant for checkboxes.
-                const float checkboxW = ImGui::GetFrameHeight();
-                const float xPos = ImGui::GetCursorPosX()
-                                 + ImGui::GetContentRegionAvail().x
-                                 - checkboxW;
-                ImGui::SameLine(xPos, 0.0f);
-                const bool changed = ImGui::Checkbox("##chk", &c.current);
+                // Labels are string literals in this codebase, so data() is
+                // null-terminated and safe to pass to ImGui::Checkbox.
+                const bool changed = ImGui::Checkbox(c.label.data(), &c.current);
                 if (changed) c.apply(c.current);
                 ShowTooltipIfAny(c.tooltip);
                 return changed;
@@ -250,11 +239,14 @@ void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
 
         ImGui::Indent(kSectionIndent);
         const float labelWidth = ComputeLabelWidth(controls);
+        int ctrlIdx = 0;
         for (auto& ctrl : controls) {
+            ImGui::PushID(ctrlIdx++);
             if (RenderControl(ctrl, labelWidth)) {
                 PersistControl(ctrl, rc);
                 anyChanged = true;
             }
+            ImGui::PopID();
             ImGui::Spacing();
         }
         ImGui::Unindent(kSectionIndent);
