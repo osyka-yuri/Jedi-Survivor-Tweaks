@@ -1,6 +1,10 @@
 #pragma once
 
 #include "cvar_resolver.hpp"
+#include "cvar_overrides.hpp"
+#include "cvar_scanner.hpp"
+
+#include "cvar_layout.hpp"
 
 #include <chrono>
 #include <condition_variable>
@@ -8,7 +12,6 @@
 #include <unordered_map>
 #include <mutex>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -36,10 +39,6 @@ public:
     bool SetInt(std::wstring_view name, int32_t value);
     bool SetFloat(std::wstring_view name, float value);
 
-    /// Batch-resolve several cvar names in a single .rdata/.text scan.
-    /// Names not found are silently skipped.
-    void ResolveBatch(std::span<const std::wstring_view> names);
-
     void StartPump(std::chrono::milliseconds period = std::chrono::milliseconds(100));
     void StopPump();
 
@@ -52,15 +51,27 @@ private:
     CVarSystem(CVarSystem&&) = delete;
     CVarSystem& operator=(CVarSystem&&) = delete;
 
-    struct PendingEntry {
-        std::wstring name;
-        std::variant<int32_t, float> value;
-        std::chrono::steady_clock::time_point addedAt;
+    // A CVar can be in one of three internal states:
+    // 1. Unknown:  No entry in m_cache — CVar has never been requested.
+    // 2. Pending:  Entry exists, but resolution hasn't succeeded yet.
+    //              Sub-state a (awaiting scan):   scanData.strAddr == 0
+    //              Sub-state b (awaiting object): scanData.strAddr != 0, but
+    //                          the CVar heap object is still null (late init).
+    // 3. Resolved: Object is live; write targets cached in ResolvedState.
+    using CVarValue = std::variant<int32_t, float>;
+
+    struct PendingState {
+        ScanEntry scanData;
+        CVarValue targetValue;
+        std::chrono::steady_clock::time_point firstSeen;
     };
 
-    struct ResolveResult {
-        std::optional<ResolvedCVar> cvar;
-        std::optional<uintptr_t> pendingPtr;
+    struct ResolvedState {
+        ResolvedCVar rc;
+    };
+
+    struct CVarState {
+        std::variant<std::monostate, PendingState, ResolvedState> state;
     };
 
     template <typename T>
@@ -74,15 +85,21 @@ private:
     template <typename T>
     bool WriteResolved(const ResolvedCVar& rc, std::wstring_view name, T value);
 
-    [[nodiscard]] ResolveResult Resolve(std::wstring_view name);
     [[nodiscard]] const ModuleInfo* GetOrFetchMod();
 
-    void ProcessPending();
+    void PerformInitialScan();
     void PumpLoop(std::chrono::milliseconds period);
 
     std::mutex m_mutex;
-    std::unordered_map<std::wstring, ResolvedCVar, WStringHash, std::equal_to<>> m_cache;
-    std::vector<PendingEntry> m_pending;
+    // Maps a CVar name to its current state.
+    std::unordered_map<std::wstring, CVarState, WStringHash, std::equal_to<>> m_cache;
+    // Names of CVars that were just added and need an initial .rdata/.text scan.
+    std::vector<std::wstring> m_needsInitialScan;
+    // Number of CVars currently in PendingState (protected by m_mutex).
+    // Used by PumpLoop to distinguish "idle — wait indefinitely" from
+    // "pending retries — wake every period".
+    size_t m_pendingCount = 0;
+
     std::optional<ModuleInfo> m_mod;
     std::once_flag m_modOnce;
 

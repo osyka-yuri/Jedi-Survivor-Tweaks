@@ -36,38 +36,6 @@ const ModuleInfo* CVarSystem::GetOrFetchMod() {
     return m_mod ? &*m_mod : nullptr;
 }
 
-CVarSystem::ResolveResult CVarSystem::Resolve(std::wstring_view name) {
-    ResolveResult result;
-
-    const auto cached = m_cache.find(name);
-    if (cached != m_cache.end()) {
-        result.cvar = cached->second;
-        return result;
-    }
-
-    const auto* mod = GetOrFetchMod();
-    if (!mod || mod->base == 0) return result;
-
-    const auto* override = CVarOverrideTable::Instance().Find(name);
-    if (auto rc = ResolveFromOverride(override, *mod)) {
-        m_cache.emplace(std::wstring(name), *rc);
-        result.cvar = std::move(*rc);
-        return result;
-    }
-
-    std::wstring_view nameArr[] = {name};
-    auto entries = ScanForNames(nameArr, *mod);
-    if (entries.empty()) return result;
-
-    auto scanResult = ResolveFromScan(entries[0], *mod, override);
-    if (scanResult.cvar) {
-        m_cache.emplace(std::wstring(name), *scanResult.cvar);
-    }
-    result.cvar = std::move(scanResult.cvar);
-    result.pendingPtr = std::move(scanResult.pendingPtr);
-    return result;
-}
-
 template <typename T>
 bool CVarSystem::WriteValue(const ResolvedCVar& rc, T value) {
     if (rc.writeAddrShadow == rc.writeAddr + sizeof(T)) {
@@ -87,7 +55,7 @@ void CVarSystem::UpdateFlags(const ResolvedCVar& rc, std::wstring_view name) {
     const uint32_t currentFlags = utils::SafeReadInt32(flagsAddr);
     const uint32_t newFlags     = (currentFlags & cvar_layout::kMaxValidFlags) | cvar_layout::kSetByConsole;
     if (utils::SafeWrite<uint32_t>(flagsAddr, newFlags)) {
-        JST_LOG_INFO("Updated priority flags for '{}' at 0x{:X}: 0x{:08X} -> 0x{:08X}.",
+        JST_LOG_DEBUG("Updated priority flags for '{}' at 0x{:X}: 0x{:08X} -> 0x{:08X}.",
                      utils::WideToUtf8(name), flagsAddr, currentFlags, newFlags);
     }
 }
@@ -111,23 +79,31 @@ template <typename T>
 bool CVarSystem::SetTyped(std::wstring_view name, T value) {
     std::lock_guard lock(m_mutex);
 
-    auto result = Resolve(name);
-    if (result.cvar) {
-        return WriteResolved<T>(*result.cvar, name, value);
+    // Hot path: heterogeneous find — no wstring allocation for already-known CVars.
+    if (auto it = m_cache.find(name); it != m_cache.end()) {
+        auto& s = it->second.state;
+        if (auto* rs = std::get_if<ResolvedState>(&s)) {
+            return WriteResolved<T>(rs->rc, name, value);
+        }
+        if (auto* ps = std::get_if<PendingState>(&s)) {
+            // Update the target value; the pump will apply it once resolved.
+            ps->targetValue = value;
+            return false;
+        }
+        // Defensive: unexpected monostate — fall through to cold path.
     }
-    if (result.pendingPtr) {
-        JST_LOG_INFO("'{}' is not ready, queued for deferred application.",
-                     utils::WideToUtf8(name));
-        PendingEntry entry;
-        entry.name = std::wstring(name);
-        entry.value = value;
-        entry.addedAt = std::chrono::steady_clock::now();
-        m_pending.push_back(std::move(entry));
-        m_pumpCv.notify_all();
-        return true;
-    }
-    JST_LOG_WARNING("CVar '{}' not found in game binary (type: {}).",
-                    utils::WideToUtf8(name), TypeName<T>());
+
+    // Cold path: first request for this CVar.
+    PendingState ps;
+    ps.targetValue = value;
+    ps.firstSeen   = std::chrono::steady_clock::now();
+    m_cache.emplace(std::wstring(name), CVarState{std::move(ps)});
+
+    ++m_pendingCount;
+    m_needsInitialScan.emplace_back(name);  // wstring_view → wstring (one alloc)
+    m_pumpCv.notify_all();
+
+    JST_LOG_DEBUG("CVar '{}' queued for async init.", utils::WideToUtf8(name));
     return false;
 }
 
@@ -139,68 +115,138 @@ bool CVarSystem::SetFloat(std::wstring_view name, float value) {
     return SetTyped<float>(name, value);
 }
 
-void CVarSystem::ResolveBatch(std::span<const std::wstring_view> names) {
-    if (names.empty()) return;
+void CVarSystem::PerformInitialScan() {
+    std::vector<std::wstring> namesToScan;
+    {
+        std::lock_guard lock(m_mutex);
+        if (m_needsInitialScan.empty()) return;
+        namesToScan = std::move(m_needsInitialScan);
+    }
 
     const auto* mod = GetOrFetchMod();
     if (!mod || mod->base == 0) return;
 
-    auto entries = ScanForNames(names, *mod);
-    if (entries.empty()) return;
+    std::vector<std::wstring_view> nameViews;
+    nameViews.reserve(namesToScan.size());
+    for (const auto& n : namesToScan) nameViews.push_back(n);
+
+    auto scannedEntries = ScanForNames(nameViews, *mod);
 
     std::lock_guard lock(m_mutex);
-    for (const auto& entry : entries) {
-        if (m_cache.find(entry.name) != m_cache.end()) continue;
 
-        const auto* override = CVarOverrideTable::Instance().Find(entry.name);
-        if (auto rc = ResolveFromOverride(override, *mod)) {
-            m_cache.emplace(std::wstring(entry.name), *rc);
-            JST_LOG_INFO("Resolved '{}' via override.", utils::WideToUtf8(entry.name));
-            continue;
-        }
-
-        auto scanResult = ResolveFromScan(entry, *mod, override);
-        if (scanResult.cvar) {
-            m_cache.emplace(std::wstring(entry.name), *scanResult.cvar);
-            JST_LOG_INFO("Resolved '{}'.", utils::WideToUtf8(entry.name));
-        }
-    }
-}
-
-void CVarSystem::ProcessPending() {
-    if (m_pending.empty()) return;
-
-    const auto now = std::chrono::steady_clock::now();
-    std::vector<PendingEntry> stillPending;
-    stillPending.reserve(m_pending.size());
-
-    for (auto& pending : m_pending) {
-        auto result = Resolve(pending.name);
-        if (result.cvar) {
-            std::visit([&](auto&& value) {
-                using T = std::decay_t<decltype(value)>;
-                WriteResolved<T>(*result.cvar, pending.name, value);
-            }, pending.value);
-            continue;
-        }
-
-        if (now - pending.addedAt > kPendingTimeout) {
-            JST_LOG_WARNING("Deferred apply for '{}' timed out and was discarded.",
-                            utils::WideToUtf8(pending.name));
-        } else {
-            stillPending.push_back(std::move(pending));
-        }
+    for (auto& scanned : scannedEntries) {
+        // scanned.name is std::wstring — use it directly for heterogeneous lookup.
+        auto it = m_cache.find(scanned.name);
+        if (it == m_cache.end()) continue;
+        auto* ps = std::get_if<PendingState>(&it->second.state);
+        if (!ps) continue;
+        ps->scanData = std::move(scanned);  // move to avoid copying the candidate vectors
     }
 
-    m_pending = std::move(stillPending);
+    // Drop any CVars that weren't found in the binary.
+    for (const auto& n : namesToScan) {
+        auto it = m_cache.find(n);
+        if (it == m_cache.end()) continue;
+        auto* ps = std::get_if<PendingState>(&it->second.state);
+        if (ps && ps->scanData.strAddr == 0) {
+            JST_LOG_WARNING("CVar '{}' not found in game binary. Dropped.", utils::WideToUtf8(n));
+            m_cache.erase(it);
+            --m_pendingCount;
+        }
+    }
 }
 
 void CVarSystem::PumpLoop(std::chrono::milliseconds period) {
-    std::unique_lock lock(m_mutex);
-    while (!m_pumpStopRequested) {
-        m_pumpCv.wait_for(lock, period, [this] { return m_pumpStopRequested; });
-        if (m_pumpStopRequested) break;
-        ProcessPending();
+    while (true) {
+        // Two-mode wait:
+        //   • pending CVars exist → timed wait (periodic retry for object construction)
+        //   • nothing pending    → indefinite wait (no spurious wakeups)
+        {
+            std::unique_lock lock(m_mutex);
+            if (m_pendingCount > 0 || !m_needsInitialScan.empty()) {
+                m_pumpCv.wait_for(lock, period, [this] {
+                    return m_pumpStopRequested || !m_needsInitialScan.empty();
+                });
+            } else {
+                m_pumpCv.wait(lock, [this] {
+                    return m_pumpStopRequested ||
+                           !m_needsInitialScan.empty() ||
+                           m_pendingCount > 0;
+                });
+            }
+            if (m_pumpStopRequested) break;
+        }
+
+        // Phase 1: Heavy .rdata/.text scan for newly-requested CVars.
+        PerformInitialScan();
+
+        // Phase 2: Evaluate pending CVars (unlock-resolve-relock).
+        const auto* mod = GetOrFetchMod();
+        if (!mod || mod->base == 0) continue;
+
+        // ---- 2a: Snapshot pending work (locked, cheap) ----
+        // We copy the scan data so Phase 2b can run without holding m_mutex
+        // while calling VirtualProtect / Logger::Log (which have their own locks).
+        struct Snapshot {
+            std::wstring   name;
+            ScanEntry      scanData;
+            CVarValue      targetValue;
+            const CVarOverride* override;
+            std::chrono::steady_clock::time_point firstSeen;
+        };
+        std::vector<Snapshot> snapshots;
+        {
+            std::lock_guard lock(m_mutex);
+            for (auto& [name, cvarState] : m_cache) {
+                const auto* ps = std::get_if<PendingState>(&cvarState.state);
+                if (!ps || ps->scanData.strAddr == 0) continue;
+                snapshots.push_back({
+                    name,
+                    ps->scanData,                              // copy candidate vectors
+                    ps->targetValue,
+                    CVarOverrideTable::Instance().Find(name),
+                    ps->firstSeen
+                });
+            }
+        }
+
+        if (snapshots.empty()) continue;
+
+        // ---- 2b: Resolve and write — no mutex held ----
+        // VirtualProtect and file I/O must not run under m_mutex.
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<std::pair<std::wstring, ResolvedCVar>> resolved;
+        std::vector<std::wstring> timedOut;
+
+        for (auto& snap : snapshots) {
+            auto result = ResolveFromScan(snap.scanData, *mod, snap.override);
+            if (result) {
+                std::visit([&](auto&& val) {
+                    using T = std::decay_t<decltype(val)>;
+                    WriteResolved<T>(*result, snap.name, val);
+                }, snap.targetValue);
+                resolved.emplace_back(snap.name, *result);
+            } else if (now - snap.firstSeen > kPendingTimeout) {
+                JST_LOG_WARNING("Deferred init for '{}' timed out.", utils::WideToUtf8(snap.name));
+                timedOut.push_back(std::move(snap.name));
+            }
+        }
+
+        // ---- 2c: Commit results (locked, cheap) ----
+        {
+            std::lock_guard lock(m_mutex);
+            for (auto& [name, rc] : resolved) {
+                auto it = m_cache.find(name);
+                if (it != m_cache.end() && std::holds_alternative<PendingState>(it->second.state)) {
+                    JST_LOG_DEBUG("Deferred init successful for '{}'.", utils::WideToUtf8(name));
+                    it->second.state = ResolvedState{rc};
+                    --m_pendingCount;
+                }
+            }
+            for (const auto& name : timedOut) {
+                if (m_cache.erase(name)) --m_pendingCount;
+            }
+        }
     }
 }
 

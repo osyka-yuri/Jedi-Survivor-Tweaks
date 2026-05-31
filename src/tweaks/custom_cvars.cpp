@@ -40,8 +40,7 @@ std::expected<void, std::string> CustomCVarsTweak::Initialize(
         return {};
     }
 
-    // Build a list of (wide-name, raw-value) entries up-front so we can batch
-    // the .text scan once across all custom cvars.
+    // Build a list of (wide-name, raw-value) entries from the [CVars] config section.
     struct Entry {
         std::wstring name;
         std::string_view value;
@@ -50,17 +49,15 @@ std::expected<void, std::string> CustomCVarsTweak::Initialize(
     entries.reserve(section->size());
     for (const auto& [name, valStr] : *section) {
         if (name == "Enabled") continue;
+        if (name.size() < 2) {
+            JST_LOG_WARNING("Skipping invalid CVar name '{}'", name);
+            continue;
+        }
         entries.push_back({jst::core::utils::Utf8ToWide(name), valStr});
     }
 
-    if (!entries.empty()) {
-        std::vector<std::wstring_view> names;
-        names.reserve(entries.size());
-        for (const auto& e : entries) names.emplace_back(e.name);
-        cvarSys.ResolveBatch(names);
-    }
-
     size_t applied = 0;
+    size_t queued = 0;
     for (const auto& e : entries) {
         const std::string_view v = e.value;
         bool ok = false;
@@ -75,6 +72,7 @@ std::expected<void, std::string> CustomCVarsTweak::Initialize(
             } else {
                 JST_LOG_ERROR("Failed to parse float CVar '{}': '{}'.",
                               jst::core::utils::WideToUtf8(e.name), v);
+                continue;
             }
         } else {
             int32_t ival = 0;
@@ -84,14 +82,16 @@ std::expected<void, std::string> CustomCVarsTweak::Initialize(
             } else {
                 JST_LOG_ERROR("Failed to parse integer CVar '{}': '{}'.",
                               jst::core::utils::WideToUtf8(e.name), v);
+                continue;
             }
         }
         if (ok) ++applied;
+        else ++queued;
     }
 
+    JST_LOG_INFO("CustomCVars: {} applied synchronously, {} queued for async initialization.", applied, queued);
+
     m_initialized = true;
-    JST_LOG_INFO("Initialized: {} of {} custom CVars accepted.",
-                 applied, entries.size());
     return {};
 }
 

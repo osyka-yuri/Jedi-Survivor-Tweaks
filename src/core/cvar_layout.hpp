@@ -46,6 +46,10 @@ constexpr uint32_t kSetByConsole = 0x0a000000;
 // FConsoleVariable (the upper byte is reserved and must be zero).
 constexpr uint32_t kMaxValidFlags = 0x00FFFFFF;
 
+// Offset of the external pointer in FConsoleVariableRef objects.
+// Used to locate the backing variable for FAutoConsoleVariableRef.
+constexpr int32_t kRefOffset = 32;      // 0x20
+
 } // namespace cvar_layout
 
 // ---------------------------------------------------------------------------
@@ -56,17 +60,18 @@ constexpr uint32_t kMaxValidFlags = 0x00FFFFFF;
 // cvar_scanner.hpp, which would otherwise create a circular include chain.
 
 struct ScanEntry {
-    std::wstring name;    // owns the string (avoids non-owning wstring_view lifetime hazard)
+    std::wstring name;      // owns the string (avoids non-owning wstring_view lifetime hazard)
     uintptr_t strAddr = 0;  // VA of the UTF-16 name string in .rdata
     uintptr_t strRVA  = 0;  // RVA (strAddr - mod.base)
 
-    // Candidate global-pointer addresses found near the name reference, paired
-    // with the int32 value stored at offset 72 of the pointed-to object.
-    // Used by the scorer to pick the most uniquely-identifiable candidate.
-    std::vector<std::pair<uintptr_t, int32_t>> globalPtrCandidates;
+    // Candidate global-pointer addresses found near the name reference.
+    std::vector<uintptr_t> globalPtrCandidates;
 
     // Candidate reference-variable addresses (LEA targets near the name LEA).
     std::vector<uintptr_t> refVarCandidates;
+
+    // Candidate reference-variable addresses from static registration scanning.
+    std::vector<uintptr_t> staticRefCandidates;
 };
 
 // ---------------------------------------------------------------------------
@@ -74,16 +79,20 @@ struct ScanEntry {
 // ---------------------------------------------------------------------------
 // Returns true iff `cvarObject` plausibly points to an FConsoleVariable:
 //   • non-null
-//   • vtable pointer lies within the game module's address range
+//   • vtable pointer lies within committed, accessible memory
 //   • flags field is within the valid range (upper byte == 0)
+//
+// The `mod` parameter is intentionally unused: vtables may belong to engine
+// DLLs (renderer, audio, etc.) loaded outside the main module range, so we
+// accept any committed address rather than gating on mod.base/mod.size.
 //
 // Declared inline so both cvar_scanner.cpp and cvar_resolver.cpp can call it
 // after including only this header, with no link-time ambiguity.
 
-[[nodiscard]] inline bool ValidateCVarObject(uintptr_t cvarObject, const ModuleInfo& mod) {
+[[nodiscard]] inline bool ValidateCVarObject(uintptr_t cvarObject, const ModuleInfo& /*mod*/) {
     if (!cvarObject) return false;
     const uintptr_t vtable = utils::SafeReadPointer(cvarObject);
-    if (vtable < mod.base || vtable >= mod.base + mod.size) return false;
+    if (!utils::IsValidPointer(vtable)) return false;
     const uint32_t flags = utils::SafeReadInt32(cvarObject + cvar_layout::kFlagsOffset);
     return flags <= cvar_layout::kMaxValidFlags;
 }

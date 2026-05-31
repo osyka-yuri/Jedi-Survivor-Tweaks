@@ -69,8 +69,6 @@ Application::Application(const fs::path& baseDir, LoaderVariant variant)
     jst::core::Logger::Instance().SetMinLevel(
         jst::core::ParseLogLevel(minLevelStr, jst::core::LogLevel::Info));
 
-    // Independent pump: applies pending CVars asynchronously regardless of which
-    // tweaks are enabled.
     jst::core::CVarSystem::Instance().StartPump();
 
     m_tweakManager.RegisterTweak<jst::tweaks::LetterboxPillarboxFix>();
@@ -93,7 +91,6 @@ Application::Application(const fs::path& baseDir, LoaderVariant variant)
 Application::~Application() {
     m_tweakManager.Shutdown();
     m_hookEngine.Shutdown();
-    jst::core::CVarSystem::Instance().StopPump();
     jst::core::Logger::Instance().Shutdown();
 }
 

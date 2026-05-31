@@ -27,7 +27,7 @@ with its own preconfigured copy.
   - **ChromaticAberration** — toggles `r.SceneColorFringeQuality` on/off.
   - **Vignette** — toggles `r.Tonemapper.Quality` on/off.
 - **InterpolatedRendering** — enables `respawn.InterpolatedRendering` to reduce CPU stutters and camera jitter.
-- **CVars** — applies arbitrary Unreal Engine console variables via the `.ini` file. CVar resolution is performed asynchronously on a background pump thread, so unresolved CVars are retried until the engine has constructed them (with a 30s timeout).
+- **CVars** — applies arbitrary Unreal Engine console variables via the `.ini` file. Resolution scans the game binary's `.rdata` section for the UTF-16 CVar name, then `.text` for references to it, deriving either a global pointer or a direct variable address. If the CVar object isn't yet constructed at startup, the write is queued and retried by a background pump thread (100 ms interval) until success or a 30 s timeout; CVars absent from the binary are dropped immediately on the first scan pass.
 
 ## Installation
 
@@ -143,8 +143,9 @@ preprocessor switches in the shared core.
 
 ```
 src/
-├── core/         # Logger, Config, MemoryScanner, PEUtils, HookEngine, CVarSystem
-├── hooks/        # ASM detours (tweak_hooks.asm) + shared C++ context (g_contexts)
+├── core/         # Logger, Config, MemoryScanner, PEUtils, HookEngine,
+│                 # CVarSystem (scanner, resolver, layout constants, per-CVar override table)
+├── hooks/        # ASM detours (tweak_hooks.asm) + shared C++ hook context
 ├── tweaks/       # Each individual tweak + the unified HookTweak base + manager
 ├── reshade/      # ReShade-Addon-only TUs (entry.cpp, overlay.cpp)
 ├── external/     # Vendored libraries:

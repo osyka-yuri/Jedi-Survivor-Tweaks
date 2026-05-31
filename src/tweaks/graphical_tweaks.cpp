@@ -39,14 +39,6 @@ namespace {
 
 std::expected<void, std::string> GraphicalTweaks::Initialize(
     [[maybe_unused]] jst::core::HookEngine& hooks, jst::core::Config& config) {
-    auto& cvarSys = jst::core::CVarSystem::Instance();
-
-    // Batch-resolve all referenced cvars in a single .text scan.
-    constexpr std::array<std::wstring_view, 3> kCVars{
-        kCVarSharpen, kCVarCAQuality, kCVarToneQual,
-    };
-    cvarSys.ResolveBatch(kCVars);
-
     // Read config, clamping the sharpening strength to the slider range so
     // the runtime control matches the loaded state.
     m_sharpenEnabled  = config.GetBool ("Sharpening",          "Enabled",  true);

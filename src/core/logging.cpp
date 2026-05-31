@@ -112,4 +112,9 @@ void Logger::Log(LogLevel level, std::string_view message, std::source_location 
     }
 }
 
+void Logger::LogV(LogLevel level, std::string_view fmt, std::format_args args, std::source_location location) {
+    if (m_minLevel > level) return;
+    Log(level, std::vformat(fmt, args), location);
+}
+
 } // namespace jst::core

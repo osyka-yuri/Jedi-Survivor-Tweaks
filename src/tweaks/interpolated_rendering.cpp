@@ -16,17 +16,10 @@ namespace {
 
 std::expected<void, std::string> InterpolatedRenderingTweak::Initialize(
     [[maybe_unused]] jst::core::HookEngine& hooks, jst::core::Config& config) {
-    auto& cvarSys = jst::core::CVarSystem::Instance();
-    constexpr std::array<std::wstring_view, 1> kCVars{ kCVar };
-    cvarSys.ResolveBatch(kCVars);
-
     m_irEnabled = config.GetBool("InterpolatedRendering", "Enabled", true);
-    if (!cvarSys.SetInt(kCVar, m_irEnabled ? 1 : 0)) {
-        return std::unexpected<std::string>("Failed to set respawn.InterpolatedRendering");
-    }
-
+    jst::core::CVarSystem::Instance().SetInt(kCVar, m_irEnabled ? 1 : 0);
     m_initialized = true;
-    JST_LOG_INFO("Initialized | interpolatedRendering='{}'.", m_irEnabled ? "on" : "off");
+    JST_LOG_INFO("Initialized | interpolatedRendering='{}' (queued for async init).", m_irEnabled ? "on" : "off");
     return {};
 }
 
