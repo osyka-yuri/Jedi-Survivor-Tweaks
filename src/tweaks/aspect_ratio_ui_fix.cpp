@@ -9,23 +9,25 @@ namespace {
     constexpr const char* kPattern = "0F 28 E0 F3 0F 5E A5 F8 01 00 00 0F 28 C4";
     constexpr int32_t kOffset = 0;
 
-    // The game multiplies the UI scale by 1.7777..(16:9) / 1.6 = 10/9 = 1.111..
-    // when running on a 16:10 display. The detour replaces that constant with
-    // a smaller multiplier so the resulting UI scale is no longer stretched.
-    // The clamp upper bound matches the original game constant -- setting
-    // Multiplier to it makes the hook a no-op.
-    constexpr float kMaxUIScale10Over9 = 10.0f / 9.0f;
+    // On a 16:10 display the game feeds 1.7777..(16:9) / 1.6 = 10/9 = 1.111..
+    // into the UI scale formula (value / 1.5), which stretches the UI. While
+    // enabled the detour unconditionally forces this numerator to the configured
+    // Multiplier (default 1.0 -> 1.0 / 1.5 = 0.667, the un-stretched result).
+    // The Multiplier is the absolute numerator now, not a "replace 1.111" guard,
+    // so it is clamped to a small band around 1.0 for safe live tuning.
+    constexpr float kMultiplierMin = 0.9f;
+    constexpr float kMultiplierMax = 1.2f;
 }
 
 namespace jst::tweaks {
 
 AspectRatioUIFix::AspectRatioUIFix()
     : HookTweak("AspectRatioUIFix",
-                "Fixes UI stretching on 16:10 displays: replaces the 16:10 aspect constant (1.111) in the UI scale formula (value / 1.5) so the result is 0.667 instead of 0.740.",
+                "Fixes UI stretching on 16:10 displays: while enabled, forces the UI scale numerator (value / 1.5) to the configured Multiplier. Default 1.0 gives 0.667 instead of the stretched 0.740. Multiplier range 0.9-1.2.",
                 false,
                 HookTarget::Pattern(kPattern, kOffset),
                 reinterpret_cast<std::uintptr_t>(&AspectRatioUIFix_Detour),
                 jst::hooks::Slot::AspectRatioUIFix,
-                MultiplierConfig{.defaultValue = 1.0f, .clampMin = 1.0f, .clampMax = kMaxUIScale10Over9}) {}
+                MultiplierConfig{.defaultValue = 1.0f, .clampMin = kMultiplierMin, .clampMax = kMultiplierMax}) {}
 
 } // namespace jst::tweaks

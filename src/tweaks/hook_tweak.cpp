@@ -119,6 +119,7 @@ std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
             .apply         = [this](float v) {
                 m_loadedMultiplier = v;
                 GetContext().multiplier = v;
+                JST_LOG_INFO("{} multiplier -> {:.3f}", m_name, v);
             },
             .configSection = m_name,
             .configKey     = cfg.configKey,
