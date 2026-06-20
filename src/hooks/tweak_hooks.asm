@@ -21,18 +21,17 @@ SLOT_ASPECTRATIOUIFIX EQU 3
 
 ; ---------------------------------------------------------------------------
 ; AspectRatioUIFix
-;   While the tweak is enabled the detour unconditionally overwrites xmm0 with
-;   the configured multiplier (Context::multiplier, [r11+8]), then re-executes
-;   the original 14-byte sequence:
+;   The patched instruction holds a UI/HUD scale proportional to render height
+;   (~height/1440: 0.75 at 1920x1080, 0.8333 at 1920x1200, 1.1111 at 2560x1600).
+;   Because it is height-based, a 16:10 display -- 10/9 taller than 16:9 at the
+;   same width -- renders the UI 10/9 too large. The detour SCALES that value by
+;   Context::multiplier ([r11+8]) and re-runs the original 14-byte sequence:
 ;       movaps xmm4, xmm0
 ;       divss  xmm4, [rbp+1F8h]
 ;       movaps xmm0, xmm4
-;   Earlier builds only substituted when xmm0 exactly equalled the 16:10 aspect
-;   constant (10/9 = 1.1111111, bits 3F8E38E4h). That exact-equality guard made
-;   the hook a silent no-op whenever the game emitted a slightly different value,
-;   so it was dropped -- the multiplier (clamped to 0.9-1.2 on the C++ side) is
-;   now the absolute UI-scale numerator. Since eax and rflags are no longer
-;   touched, only r11/rcx need saving (mirrors LetterboxPillarboxFix_Detour).
+;   A factor of 0.9 (= 9/10) maps any 16:10 resolution onto its 16:9 equivalent
+;   (0.8333*0.9=0.75, 1.1111*0.9=1.0); 1.0 is a no-op, safe on any aspect ratio.
+;   mulss touches no GP register and no rflags, so only r11/rcx need saving.
 ; ---------------------------------------------------------------------------
 AspectRatioUIFix_Detour PROC PUBLIC
     sub rsp, 8                      ; reserve slot for resume address
@@ -43,7 +42,7 @@ AspectRatioUIFix_Detour PROC PUBLIC
     mov rcx, qword ptr [r11 + 0]
     mov qword ptr [rsp + 16], rcx   ; store resume address in the reserved slot
 
-    movss xmm0, dword ptr [r11 + 8] ; unconditionally apply configured multiplier
+    mulss xmm0, dword ptr [r11 + 8] ; scale the UI value by the configured factor
     movaps xmm4, xmm0               ; original 14-byte sequence follows
     divss xmm4, dword ptr [rbp+000001F8h]
     movaps xmm0, xmm4

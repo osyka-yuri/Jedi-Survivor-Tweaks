@@ -19,7 +19,7 @@ same file name; the mod ships in two separate archives (ASI / ReShade) each
 with its own preconfigured copy.
 
 - **LetterboxPillarboxFix** — removes pillarboxing / letterboxing (black bars) during cutscenes on 21:9 and wider displays. Enabled by default.
-- **AspectRatioUIFix** — workaround for broken UI scaling on 16:10 displays. While enabled, the hook forces the numerator of the game's UI scale formula (`value / 1.5`) to the configured `Multiplier`. The default `1.0` gives `1.0 / 1.5 = 0.667` instead of the stretched `1.111 / 1.5 = 0.740`. Configurable `Multiplier` (0.9–1.2; default 1.0). On 16:9 the game already feeds ~`1.0`, so the default multiplier leaves it unchanged. Note: the multiplier is applied unconditionally while enabled, so values other than `1.0` can also affect non-16:10 ratios — it's an opt-in 16:10 fix (disabled by default).
+- **AspectRatioUIFix** — fixes oversized UI on 16:10 displays. The game scales the UI by a factor proportional to render height, so a 16:10 screen (10/9 taller than 16:9 at the same width) renders the UI 10/9 too large. The hook multiplies that factor by `Multiplier`: the default `0.9` (= 9/10) maps any 16:10 resolution onto its 16:9 equivalent, and `1.0` leaves it unchanged. It is resolution-independent — the same `0.9` works at 1280×800, 1920×1200, 2560×1600, etc. Configurable `Multiplier` (0.5–1.5; default 0.9). Opt-in (disabled by default); on 16:9 leave it off or at `1.0`.
 - **GameplayFOV** — adjusts the gameplay field of view via a `Multiplier` (0.0–10.0).
 - **CameraDistance** — adjusts the camera distance from the player via a `Multiplier` (0.0–10.0).
 - **GraphicalTweaks**:
@@ -61,7 +61,7 @@ Once loaded, the **Add-ons → JediSurvivorTweaks** panel provides, per tweak:
 - A green/red **status dot** next to the tweak name (green = loaded; red = disabled in `.ini` or failed to install).
 - A **"Load on launch"** checkbox that persists the tweak's `[Section] Enabled` key. Hooks can't be installed or removed at runtime, so this takes effect on next launch — the live controls below it are the way to change behaviour right now.
 - **Live runtime controls** that take effect immediately:
-  - **Sliders** for the multiplier tweaks: GameplayFOV, CameraDistance, AspectRatioUIFix (range 0–10, or 0.9–1.2 for AspectRatioUIFix).
+  - **Sliders** for the multiplier tweaks: GameplayFOV, CameraDistance, AspectRatioUIFix (range 0–10, or 0.5–1.5 for AspectRatioUIFix).
   - **Sharpening on/off** checkbox + **Sharpening Strength** slider (0–10).
   - **Chromatic Aberration**, **Vignette**, and **Interpolated Rendering** on/off checkboxes.
 - Per-tweak **Reset** button (top-right of each section) snaps that tweak's controls back to defaults.
@@ -84,7 +84,7 @@ whenever the overlay changes a value (see above).
 ```ini
 [AspectRatioUIFix]
 Enabled = false
-Multiplier = 1.0        ; 0.9–1.2 (UI scale numerator, applied while enabled; disable the tweak to revert)
+Multiplier = 0.9        ; 0.5–1.5 UI-scale factor; 0.9 = 16:10→16:9 fix, 1.0 = no change
 
 [LetterboxPillarboxFix]
 Enabled = true

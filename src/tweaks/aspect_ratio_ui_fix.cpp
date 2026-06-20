@@ -9,25 +9,27 @@ namespace {
     constexpr const char* kPattern = "0F 28 E0 F3 0F 5E A5 F8 01 00 00 0F 28 C4";
     constexpr int32_t kOffset = 0;
 
-    // On a 16:10 display the game feeds 1.7777..(16:9) / 1.6 = 10/9 = 1.111..
-    // into the UI scale formula (value / 1.5), which stretches the UI. While
-    // enabled the detour unconditionally forces this numerator to the configured
-    // Multiplier (default 1.0 -> 1.0 / 1.5 = 0.667, the un-stretched result).
-    // The Multiplier is the absolute numerator now, not a "replace 1.111" guard,
-    // so it is clamped to a small band around 1.0 for safe live tuning.
-    constexpr float kMultiplierMin = 0.9f;
-    constexpr float kMultiplierMax = 1.2f;
+    // The patched instruction holds a UI scale proportional to render height
+    // (~height/1440), so a 16:10 display -- 10/9 taller than 16:9 at the same
+    // width -- gets a UI 10/9 too large. The detour multiplies that value by
+    // Multiplier, so a factor of 0.9 (= 9/10) maps ANY 16:10 resolution onto its
+    // 16:9 equivalent (1.1111*0.9=1.0, 0.8333*0.9=0.75) while 1.0 is a no-op,
+    // safe on any aspect ratio. Default is the 16:10 fix; the range allows
+    // fine-tuning plus modest up/down UI scaling.
+    constexpr float kDefaultMultiplier = 0.9f;
+    constexpr float kMultiplierMin     = 0.5f;
+    constexpr float kMultiplierMax     = 1.5f;
 }
 
 namespace jst::tweaks {
 
 AspectRatioUIFix::AspectRatioUIFix()
     : HookTweak("AspectRatioUIFix",
-                "Fixes UI stretching on 16:10 displays: while enabled, forces the UI scale numerator (value / 1.5) to the configured Multiplier. Default 1.0 gives 0.667 instead of the stretched 0.740. Multiplier range 0.9-1.2.",
+                "Fixes oversized UI on 16:10 displays. The game scales the UI by a height-based factor, so 16:10 (10/9 taller than 16:9) is 10/9 too large. Multiplier MULTIPLIES that factor: 0.9 maps any 16:10 resolution to its 16:9 equivalent (default), 1.0 = no change. Resolution-independent. Range 0.5-1.5.",
                 false,
                 HookTarget::Pattern(kPattern, kOffset),
                 reinterpret_cast<std::uintptr_t>(&AspectRatioUIFix_Detour),
                 jst::hooks::Slot::AspectRatioUIFix,
-                MultiplierConfig{.defaultValue = 1.0f, .clampMin = kMultiplierMin, .clampMax = kMultiplierMax}) {}
+                MultiplierConfig{.defaultValue = kDefaultMultiplier, .clampMin = kMultiplierMin, .clampMax = kMultiplierMax}) {}
 
 } // namespace jst::tweaks
