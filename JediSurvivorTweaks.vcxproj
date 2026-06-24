@@ -171,6 +171,7 @@
     <ClCompile Include="src\tweaks\graphical_tweaks.cpp" />
     <ClCompile Include="src\tweaks\interpolated_rendering.cpp" />
     <ClCompile Include="src\tweaks\custom_cvars.cpp" />
+    <ClCompile Include="src\tweaks\streaming_pool_fix.cpp" />
     <ClCompile Include="src\external\hde64\hde64.c">
       <!-- Vendored disassembler: keep its baseline warning level so upstream
            noise doesn't pollute our W4 build. -->
@@ -204,6 +205,7 @@
     <ClInclude Include="src\tweaks\graphical_tweaks.hpp" />
     <ClInclude Include="src\tweaks\interpolated_rendering.hpp" />
     <ClInclude Include="src\tweaks\custom_cvars.hpp" />
+    <ClInclude Include="src\tweaks\streaming_pool_fix.hpp" />
     <ClInclude Include="src\external\hde64\hde64.h" />
     <ClInclude Include="src\reshade\overlay.hpp" />
     <ClInclude Include="src\external\reshade\imgui_compat.hpp" />

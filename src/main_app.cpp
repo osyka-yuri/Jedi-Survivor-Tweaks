@@ -9,6 +9,7 @@
 #include "tweaks/graphical_tweaks.hpp"
 #include "tweaks/interpolated_rendering.hpp"
 #include "tweaks/custom_cvars.hpp"
+#include "tweaks/streaming_pool_fix.hpp"
 
 #include <atomic>
 #include <memory>
@@ -78,6 +79,7 @@ Application::Application(const fs::path& baseDir, LoaderVariant variant)
     m_tweakManager.RegisterTweak<jst::tweaks::GraphicalTweaks>();
     m_tweakManager.RegisterTweak<jst::tweaks::InterpolatedRenderingTweak>();
     m_tweakManager.RegisterTweak<jst::tweaks::CustomCVarsTweak>();
+    m_tweakManager.RegisterTweak<jst::tweaks::StreamingPoolFix>();
 
     auto initRes = m_tweakManager.Initialize(m_hookEngine, m_config);
     if (!initRes) {

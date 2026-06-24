@@ -6,4 +6,5 @@ extern "C" {
     void CameraDistance_Detour();
     void LetterboxPillarboxFix_Detour();
     void AspectRatioUIFix_Detour();
+    void StreamingPoolFix_Detour();
 }

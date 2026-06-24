@@ -34,7 +34,7 @@ std::expected<void, std::string> HookTweak::Initialize(jst::core::HookEngine& ho
         m_loadedMultiplier = std::clamp(
             config.GetFloat(m_name, cfg.configKey, cfg.defaultValue),
             cfg.clampMin, cfg.clampMax);
-        GetContext().multiplier = m_loadedMultiplier;
+        ApplyMultiplier(m_loadedMultiplier);
     }
 
     // Register only; the actual pattern scan is batched in HookEngine::ResolveAll()
@@ -111,19 +111,19 @@ std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
         // immediate-effect slider below.
         controls.push_back(LabelControl{ .label = "Live below \xe2\x86\x93" });  // ↓ (U+2193)
         controls.push_back(SliderFloatControl{
-            .label         = cfg.configKey,
+            .label         = cfg.sliderLabel.empty() ? cfg.configKey : cfg.sliderLabel,
             .min           = cfg.clampMin,
             .max           = cfg.clampMax,
             .current       = m_loadedMultiplier,
             .defaultValue  = cfg.defaultValue,
             .apply         = [this](float v) {
                 m_loadedMultiplier = v;
-                GetContext().multiplier = v;
+                ApplyMultiplier(v);
                 JST_LOG_INFO("{} multiplier -> {:.3f}", m_name, v);
             },
             .configSection = m_name,
             .configKey     = cfg.configKey,
-            .tooltip       = "Multiplier applied at runtime. Takes effect immediately.",
+            .tooltip       = cfg.sliderTooltip,
         });
     }
 

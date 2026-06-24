@@ -38,6 +38,12 @@ struct MultiplierConfig {
     float defaultValue = 1.0f;
     float clampMin = 0.0f;
     float clampMax = 10.0f;
+    // Optional overrides for the runtime slider's label/tooltip. Empty
+    // sliderLabel falls back to configKey; sliderTooltip defaults to the
+    // generic "multiplier" wording. String_views must point at stable storage
+    // (string literals or owning members), per runtime_control.hpp.
+    std::string_view sliderLabel{};
+    std::string_view sliderTooltip = "Multiplier applied at runtime. Takes effect immediately.";
 };
 
 /// Unified hook-based tweak base class. Concrete tweaks supply a `HookTarget`,
@@ -69,8 +75,20 @@ public:
 protected:
     virtual void OnConfigLoaded(jst::core::Config& /*config*/) {}
     virtual void OnHookResolved(const jst::hooks::Context& /*context*/) {}
+    virtual void OnMultiplierChanged(float /*value*/) {}
 
     [[nodiscard]] jst::hooks::Context& GetContext() const { return jst::hooks::GetContext(m_slot); }
+
+    // Updates the multiplier value and triggers `OnMultiplierChanged` to sync
+    // any slot-specific derivative data. Always use this instead of directly
+    // modifying the multiplier field.
+    void ApplyMultiplier(float m) {
+        GetContext().multiplier = m;
+        OnMultiplierChanged(m);
+    }
+
+    void SetPayload0(uint64_t value) { GetContext().payload0 = value; }
+    [[nodiscard]] uint64_t GetPayload0() const { return GetContext().payload0; }
 
     // Last value loaded by the standard MultiplierConfig path. 0.0f if no
     // MultiplierConfig was provided.  Updated by the runtime slider so that

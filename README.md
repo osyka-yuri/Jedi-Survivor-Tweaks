@@ -27,6 +27,7 @@ with its own preconfigured copy.
   - **ChromaticAberration** — toggles `r.SceneColorFringeQuality` on/off.
   - **Vignette** — toggles `r.Tonemapper.Quality` on/off.
 - **InterpolatedRendering** — enables `respawn.InterpolatedRendering` to reduce CPU stutters and camera jitter.
+- **StreamingPoolFix** — locks the streaming pool size to a configured number of gigabytes (`PoolSizeGB`, 1.0–12.0; default 2.0) to prevent the unbounded VRAM growth (memory leak) the game can exhibit. Opt-in (disabled by default).
 - **CVars** — applies arbitrary Unreal Engine console variables via the `.ini` file. Resolution scans the game binary's `.rdata` section for the UTF-16 CVar name, then `.text` for references to it, deriving either a global pointer or a direct variable address. If the CVar object isn't yet constructed at startup, the write is queued and retried by a background pump thread (100 ms interval) until success or a 30 s timeout; CVars absent from the binary are dropped immediately on the first scan pass.
 
 ## Installation
@@ -61,7 +62,7 @@ Once loaded, the **Add-ons → JediSurvivorTweaks** panel provides, per tweak:
 - A green/red **status dot** next to the tweak name (green = loaded; red = disabled in `.ini` or failed to install).
 - A **"Load on launch"** checkbox that persists the tweak's `[Section] Enabled` key. Hooks can't be installed or removed at runtime, so this takes effect on next launch — the live controls below it are the way to change behaviour right now.
 - **Live runtime controls** that take effect immediately:
-  - **Sliders** for the multiplier tweaks: GameplayFOV, CameraDistance, AspectRatioUIFix (range 0–10, or 0.5–1.5 for AspectRatioUIFix).
+  - **Sliders** for the multiplier tweaks: GameplayFOV, CameraDistance, AspectRatioUIFix (range 0–10, or 0.5–1.5 for AspectRatioUIFix), and StreamingPoolFix's **Pool Size (GB)** (1–24).
   - **Sharpening on/off** checkbox + **Sharpening Strength** slider (0–10).
   - **Chromatic Aberration**, **Vignette**, and **Interpolated Rendering** on/off checkboxes.
 - Per-tweak **Reset** button (top-right of each section) snaps that tweak's controls back to defaults.
@@ -112,6 +113,10 @@ Enabled = true
 
 [InterpolatedRendering]
 Enabled = true
+
+[StreamingPoolFix]
+Enabled = false
+PoolSizeGB = 2.0       ; 1.0-12.0 streaming pool size in GB
 
 [CVars]
 ; r.VSync = 0
