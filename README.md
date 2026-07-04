@@ -1,22 +1,31 @@
-# Jedi Survivor Tweaks
+<div align="center">
+  <h1>Jedi Survivor Tweaks</h1>
 
-A collection of tweaks and fixes for **Star Wars Jedi: Survivor**. Ships as two
-interchangeable build variants from a single source tree:
+  <p><strong>A collection of tweaks and fixes for Star Wars Jedi: Survivor.</strong></p>
+
+  <div>
+    <a href="https://boosty.to/osyka.yuri/donate"><img src="https://img.shields.io/badge/☕_Support_on-Boosty-F15C22?style=for-the-badge&labelColor=1c1c1c" alt="Support on Boosty"/></a>
+    <img src="https://img.shields.io/badge/License-MIT-4a9eff?style=for-the-badge&labelColor=1c1c1c" alt="License" />
+  </div>
+
+  <div style="margin-top: 10px;">
+    <img src="https://img.shields.io/badge/C++-23-00599C?style=for-the-badge&logo=c%2B%2B&logoColor=white&labelColor=1c1c1c" alt="C++" />
+    <img src="https://img.shields.io/badge/Platform-Windows-0078d4?style=for-the-badge&logo=windows&logoColor=white&labelColor=1c1c1c" alt="Windows" />
+  </div>
+</div>
+
+<br />
+
+Ships as two interchangeable build variants from a single source tree:
 
 - **ASI plugin** (`JediSurvivorTweaks.asi`) — loaded via Ultimate ASI Loader.
 - **ReShade Addon** (`JediSurvivorTweaks.addon64`) — loaded directly by ReShade; ships with an in-game ImGui overlay for live tuning.
 
-The two variants are alternatives that share the same `JediSurvivorTweaks.ini`
-schema and identical in-game behaviour. Pick whichever loader you already have
-set up — for live runtime tuning without restarting the game, choose the
-ReShade Addon variant.
+> **Note:** The two variants are alternatives that share the same `JediSurvivorTweaks.ini` schema and identical in-game behaviour. Pick whichever loader you already have set up — for live runtime tuning without restarting the game, choose the ReShade Addon variant.
 
-## Features
+## ✨ Features
 
-All features can be toggled on or off individually via the
-`JediSurvivorTweaks.ini` configuration file. Both build variants use the
-same file name; the mod ships in two separate archives (ASI / ReShade) each
-with its own preconfigured copy.
+All features can be toggled on or off individually via the `JediSurvivorTweaks.ini` configuration file. Both build variants use the same file name; the mod ships in two separate archives (ASI / ReShade) each with its own preconfigured copy.
 
 - **LetterboxPillarboxFix** — removes pillarboxing / letterboxing (black bars) during cutscenes on 21:9 and wider displays. Enabled by default.
 - **AspectRatioUIFix** — fixes oversized UI on 16:10 displays. The game scales the UI by a factor proportional to render height, so a 16:10 screen (10/9 taller than 16:9 at the same width) renders the UI 10/9 too large. The hook multiplies that factor by `Multiplier`: the default `0.9` (= 9/10) maps any 16:10 resolution onto its 16:9 equivalent, and `1.0` leaves it unchanged. It is resolution-independent — the same `0.9` works at 1280×800, 1920×1200, 2560×1600, etc. Configurable `Multiplier` (0.5–1.5; default 0.9). Opt-in (disabled by default); on 16:9 leave it off or at `1.0`.
@@ -30,10 +39,9 @@ with its own preconfigured copy.
 - **StreamingPoolFix** — locks the streaming pool size to a configured number of gigabytes (`PoolSizeGB`, 1.0–12.0; default 2.0) to prevent the unbounded VRAM growth (memory leak) the game can exhibit. Opt-in (disabled by default).
 - **CVars** — applies arbitrary Unreal Engine console variables via the `.ini` file. Resolution scans the game binary's `.rdata` section for the UTF-16 CVar name, then `.text` for references to it, deriving either a global pointer or a direct variable address. If the CVar object isn't yet constructed at startup, the write is queued and retried by a background pump thread (100 ms interval) until success or a 30 s timeout; CVars absent from the binary are dropped immediately on the first scan pass.
 
-## Installation
+## 🚀 Getting Started
 
-Pick **one** of the two variants below. Both read the same `JediSurvivorTweaks.ini`
-and produce identical in-game behaviour.
+Pick **one** of the two variants below. Both read the same `JediSurvivorTweaks.ini` and produce identical in-game behaviour.
 
 ### Variant A — ASI plugin
 
@@ -45,15 +53,10 @@ and produce identical in-game behaviour.
 
 ### Variant B — ReShade Addon
 
-1. Download and install [ReShade](https://reshade.me/#download). When the
-   installer asks which version, pick the **"with full add-on support"**
-   build — the stock signed ReShade has add-ons disabled and won't load
-   `.addon64` files.
-2. Copy `JediSurvivorTweaks.addon64` next to the ReShade DLL the game loads,
-   or into the directory pointed to by `AddonPath` in `ReShade.ini`.
+1. Download and install [ReShade](https://reshade.me/#download). When the installer asks which version, pick the **"with full add-on support"** build — the stock signed ReShade has add-ons disabled and won't load `.addon64` files.
+2. Copy `JediSurvivorTweaks.addon64` next to the ReShade DLL the game loads, or into the directory pointed to by `AddonPath` in `ReShade.ini`.
 3. Copy `JediSurvivorTweaks.ini` to the same directory.
-4. Launch the game. Open the ReShade overlay (default: **Home** key); in the **Add-ons** tab you
-   should see "JediSurvivorTweaks" listed as loaded.
+4. Launch the game. Open the ReShade overlay (default: **Home** key); in the **Add-ons** tab you should see "JediSurvivorTweaks" listed as loaded.
 
 #### In-game overlay panel
 
@@ -68,19 +71,11 @@ Once loaded, the **Add-ons → JediSurvivorTweaks** panel provides, per tweak:
 - Per-tweak **Reset** button (top-right of each section) snaps that tweak's controls back to defaults.
 - Global **Reset to Defaults** button at the bottom resets every tweak's runtime controls.
 
-Changes are autosaved to `JediSurvivorTweaks.ini` after a short debounce
-(500 ms); there is no explicit Save button. The ReShade Addon rewrites
-the file in a deterministic, comment-free format — manual comments and
-custom key ordering won't survive an overlay save. The same tooltip text
-you see in the overlay carries the documentation that the comments used
-to.
+> **Note:** Changes are autosaved to `JediSurvivorTweaks.ini` after a short debounce (500 ms); there is no explicit Save button. The ReShade Addon rewrites the file in a deterministic, comment-free format — manual comments and custom key ordering won't survive an overlay save. The same tooltip text you see in the overlay carries the documentation that the comments used to.
 
-## Configuration
+## ⚙️ Configuration
 
-Edit `JediSurvivorTweaks.ini` directly in any text editor. Each tweak
-section has an `Enabled` flag plus tweak-specific values. The ASI variant
-never rewrites this file from the runtime; the ReShade Addon rewrites it
-whenever the overlay changes a value (see above).
+Edit `JediSurvivorTweaks.ini` directly in any text editor. Each tweak section has an `Enabled` flag plus tweak-specific values. The ASI variant never rewrites this file from the runtime; the ReShade Addon rewrites it whenever the overlay changes a value (see above).
 
 ```ini
 [AspectRatioUIFix]
@@ -126,7 +121,7 @@ PoolSizeGB = 2.0       ; 1.0-12.0 streaming pool size in GB
 MinLevel = Info         ; Debug | Info | Warning | Error
 ```
 
-## Build Requirements
+## 🛠️ Build Requirements
 
 - Visual Studio 2022 (or Build Tools 2022+)
 - Platform toolset **v145** (also supported: v143)
@@ -134,17 +129,14 @@ MinLevel = Info         ; Debug | Info | Warning | Error
 - MASM (`ml64`) — wired in via the project's `BuildCustomizations\masm.props/.targets`
 - Target: x64 (Release recommended)
 
-To build from the command line, run `build.bat`. It builds both variants
-sequentially:
+To build from the command line, run `build.bat`. It builds both variants sequentially:
 
 - `x64\Release\JediSurvivorTweaks.asi` (ASI plugin)
 - `x64\ReleaseAddon\JediSurvivorTweaks.addon64` (ReShade Addon)
 
-Each variant is selected by an MSBuild configuration (`Release` vs `ReleaseAddon`)
-and is compiled from disjoint entry-point translation units — there are no
-preprocessor switches in the shared core.
+> **Note:** Each variant is selected by an MSBuild configuration (`Release` vs `ReleaseAddon`) and is compiled from disjoint entry-point translation units — there are no preprocessor switches in the shared core.
 
-## Project Layout
+## 🏗️ Architecture
 
 ```
 src/
@@ -160,14 +152,12 @@ src/
 └── entry_asi.cpp       # ASI loader entry-point
 ```
 
-## Support
+## 📄 License
 
-<p align="center">
-  <a href="https://boosty.to/osyka.yuri/donate">
-    <img src="https://img.shields.io/badge/%E2%98%95%20Support%20on-Boosty-F15C22?style=for-the-badge&labelColor=1c1c1c" alt="Support on Boosty"/>
-  </a>
-</p>
+Licensed under the MIT License.
 
-## License
+## ☕ Support
 
-MIT License
+**If Jedi Survivor Tweaks enhances your gameplay experience, consider supporting its development:**
+
+<a href="https://boosty.to/osyka.yuri/donate"><img src="https://img.shields.io/badge/☕_Support_on-Boosty-F15C22?style=for-the-badge&labelColor=1c1c1c" alt="Support on Boosty"/></a>
