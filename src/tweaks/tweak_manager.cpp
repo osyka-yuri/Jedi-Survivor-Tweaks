@@ -7,17 +7,6 @@
 
 namespace jst::tweaks {
 
-namespace {
-    std::string JoinErrors(const std::vector<std::string>& errs) {
-        std::string out;
-        for (size_t i = 0; i < errs.size(); ++i) {
-            if (i != 0) out += "; ";
-            out += errs[i];
-        }
-        return out;
-    }
-}
-
 std::expected<size_t, std::string> TweakManager::Initialize(core::HookEngine& hooks, core::Config& config) {
     if (m_initialized) return 0;
 
@@ -44,18 +33,14 @@ std::expected<size_t, std::string> TweakManager::Initialize(core::HookEngine& ho
     }
 
     // Step 2: single-pass batch scan resolves every pending pattern hook.
-    auto resolveRes = hooks.ResolveAll();
-    if (!resolveRes) {
-        // Log all resolve errors but keep going -- hooks that did resolve can
-        // still install, and TweakManager mirrors the existing best-effort
-        // semantics. FinalizeResolution per tweak will catch unresolved cases.
-        for (const auto& e : resolveRes.error()) {
-            JST_LOG_ERROR("Hook resolve failure: {}", e);
-        }
+    for (const auto& error : hooks.ResolveAll()) {
+        JST_LOG_ERROR("Hook resolve failure [{}]: {}", error.site, error.message);
     }
 
-    // Step 3: hand resume addresses to each (still-active) tweak.
-    size_t enabledCount = 0;
+    // Step 3: hand continuation addresses to each still-active tweak. A
+    // multi-site tweak unregisters its entire group if any binding is missing.
+    std::vector<ITweak*> resolvedTweaks;
+    resolvedTweaks.reserve(activeTweaks.size());
     for (auto* tweak : activeTweaks) {
         auto finRes = tweak->FinalizeResolution(hooks);
         if (!finRes) {
@@ -63,15 +48,25 @@ std::expected<size_t, std::string> TweakManager::Initialize(core::HookEngine& ho
                           tweak->Name(), finRes.error());
             continue;
         }
-        ++enabledCount;
+        resolvedTweaks.push_back(tweak);
     }
 
-    // Step 4: write all detours under a single ThreadSuspender pass.
-    auto installRes = hooks.InstallAll();
-    if (!installRes) {
-        const auto& errs = installRes.error();
-        return std::unexpected(std::format("Failed to install {} hook(s): {}",
-                                           errs.size(), JoinErrors(errs)));
+    // Step 4: prepare every gateway, seal the arena, then install each public
+    // hook group transactionally while other process threads are suspended.
+    for (const auto& error : hooks.InstallAll()) {
+        JST_LOG_ERROR("Hook install failure [{}]: {}", error.site, error.message);
+    }
+
+    // Step 5: publish only fully installed groups to the overlay/runtime state.
+    size_t enabledCount = 0;
+    for (auto* tweak : resolvedTweaks) {
+        auto installed = tweak->FinalizeInstallation(hooks);
+        if (!installed) {
+            JST_LOG_ERROR("Failed to publish tweak '{}'. Error: '{}'.",
+                          tweak->Name(), installed.error());
+            continue;
+        }
+        ++enabledCount;
     }
 
     m_initialized = true;

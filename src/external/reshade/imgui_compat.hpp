@@ -44,6 +44,10 @@ typedef int            ImGuiButtonFlags;
 typedef int            ImGuiColorEditFlags;
 typedef int            ImGuiDragDropFlags;
 typedef int            ImGuiSliderFlags;
+enum ImGuiSliderFlags_ {
+    ImGuiSliderFlags_None            = 0,
+    ImGuiSliderFlags_NoRoundToFormat = 1 << 4,
+};
 typedef int            ImGuiMouseButton;
 typedef int            ImGuiMouseCursor;
 typedef int            ImGuiSortDirection;

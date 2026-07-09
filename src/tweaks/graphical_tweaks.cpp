@@ -2,8 +2,7 @@
 #include "core/cvar_system.hpp"
 #include "core/config.hpp"
 #include "core/logging.hpp"
-#include <algorithm>
-#include <array>
+#include "slider_specs.hpp"
 #include <format>
 
 namespace jst::tweaks {
@@ -20,10 +19,6 @@ namespace {
     constexpr int kCAQualityOff  = 0;
     constexpr int kToneQualOn    = 5;  // game default (vignette enabled)
     constexpr int kToneQualOff   = 1;  // tonemap quality at which vignette is suppressed
-
-    constexpr float kSharpenMin     = 0.0f;
-    constexpr float kSharpenMax     = 10.0f;
-    constexpr float kSharpenDefault = 1.0f;
 
     // Single source of truth for each runtime toggle's effect.
     void ApplySharpen(bool on, float strength) {
@@ -42,9 +37,9 @@ std::expected<void, std::string> GraphicalTweaks::Initialize(
     // Read config, clamping the sharpening strength to the slider range so
     // the runtime control matches the loaded state.
     m_sharpenEnabled  = config.GetBool ("Sharpening",          "Enabled",  true);
-    m_sharpenStrength = std::clamp(
-        config.GetFloat("Sharpening", "Strength", kSharpenDefault),
-        kSharpenMin, kSharpenMax);
+    m_sharpenStrength = LoadSliderValue(
+        config.GetFloat("Sharpening", "Strength", kSharpenSliderSpec.defaultValue),
+        kSharpenSliderSpec);
     m_caEnabled       = config.GetBool ("ChromaticAberration", "Enabled",  true);
     m_vignetteEnabled = config.GetBool ("Vignette",            "Enabled",  true);
 
@@ -85,20 +80,17 @@ std::vector<RuntimeControl> GraphicalTweaks::GetRuntimeControls() {
         .tooltip       = "Enable or disable the post-process sharpening filter.",
     });
 
-    controls.push_back(SliderFloatControl{
-        .label         = "Sharpening Strength",
-        .min           = kSharpenMin,
-        .max           = kSharpenMax,
-        .current       = m_sharpenStrength,
-        .defaultValue  = kSharpenDefault,
-        .apply         = [this](float v) {
-            m_sharpenStrength = v;
+    controls.push_back(MakeSliderFloatControl(
+        kSharpenSliderSpec,
+        m_sharpenStrength,
+        [this](float value) {
+            m_sharpenStrength = value;
             ApplySharpen(m_sharpenEnabled, m_sharpenStrength);
         },
-        .configSection = "Sharpening",
-        .configKey     = "Strength",
-        .tooltip       = "0 = off, 1 = default, 10 = very strong. Only active when sharpening is enabled.",
-    });
+        "Sharpening Strength",
+        "Sharpening",
+        "Strength",
+        "0 = off, 1 = default, 10 = very strong. Only active when sharpening is enabled."));
 
     controls.push_back(CheckboxControl{
         .label         = "Chromatic Aberration",

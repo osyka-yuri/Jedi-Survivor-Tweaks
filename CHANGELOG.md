@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-09
+
+### Fixed
+- **AspectRatioUIFix now scales the in-game HUD and 3D map markers on 16:10 displays.** Previous releases only patched the menu UI code path; the HUD lived in a separate function and stayed oversized — health bars, prompts, minimap overlays, and world markers were unaffected. This release adds a dedicated HUD hook that multiplies the render value before it is stored, alongside the existing menu hook. Both sites share the same `Multiplier` from `[AspectRatioUIFix]`; no new INI keys.
+
+### Added
+- **Overlay slider steps.** Runtime sliders now snap to a fixed grid while you drag them, not only after you release the mouse. Multiplier sliders (GameplayFOV, CameraDistance, AspectRatioUIFix), **Sharpening Strength**, and **Pool Size (GB)** step by **0.1**; pool minimum lowered to **0.5 GB** (was 1.0).
+
+### Changed
+- **Internals only — no user-facing INI or behaviour changes beyond the fixes above.** Hook engine rebuilt on Zydis 4.1.1 (replacing HDE64) with transactional group install/rollback, gateway allocation within `rel32` range, and a `slots.def` registry that generates MASM slot constants. `AspectRatioUIFix` is now a two-site hook group (Hud + Menu); `StreamingPoolFix` slot index moved accordingly. Unit tests added for the hook engine and slider utilities.
+
 ## [1.2.0] - 2026-06-24
 ### Added
 - **StreamingPoolFix** — locks the streaming pool size to a configured number of gigabytes (`PoolSizeGB`, 1.0–12.0; default 2.0) to prevent the unbounded VRAM growth the game can exhibit. Opt-in (disabled by default).

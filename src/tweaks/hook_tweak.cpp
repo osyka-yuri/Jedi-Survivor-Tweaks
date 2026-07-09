@@ -1,130 +1,174 @@
 #include "hook_tweak.hpp"
-#include "core/hook_engine.hpp"
+
+#include "runtime_control.hpp"
 #include "core/config.hpp"
+#include "core/hook_engine.hpp"
 #include "core/logging.hpp"
 
 #include <algorithm>
 #include <format>
+#include <utility>
 
 namespace jst::tweaks {
 
-HookTweak::HookTweak(std::string name, std::string description, bool enabledByDefault,
-                     HookTarget target, std::uintptr_t detour, jst::hooks::Slot slot,
-                     std::optional<MultiplierConfig> multiplierCfg)
+HookTweak::HookTweak(std::string name,
+                     std::string description,
+                     bool enabledByDefault,
+                     HookTarget target,
+                     std::uintptr_t detour,
+                     jst::hooks::Slot slot,
+                     std::optional<RuntimeFloatConfig> runtimeFloatConfig)
     : m_name(std::move(name)),
       m_description(std::move(description)),
-      m_target(std::move(target)),
-      m_detour(detour),
-      m_slot(slot),
-      m_multiplierCfg(std::move(multiplierCfg)),
-      m_configEnabled(enabledByDefault),      // overwritten in Initialize if called
+      m_bindings{
+          HookBinding{m_name, std::move(target), detour, slot},
+      },
+      m_runtimeFloatConfig(std::move(runtimeFloatConfig)),
+      m_overlayEnabledPref(enabledByDefault),
       m_enabledByDefault(enabledByDefault) {}
 
-std::expected<void, std::string> HookTweak::Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) {
-    // Sync the in-memory config-enabled flag so GetRuntimeControls() shows the
-    // current .ini value even for initialized tweaks.
-    m_configEnabled = config.GetBool(m_name, "Enabled", m_enabledByDefault);
+HookTweak::HookTweak(std::string name,
+                     std::string description,
+                     bool enabledByDefault,
+                     std::vector<HookBinding> bindings,
+                     std::optional<RuntimeFloatConfig> runtimeFloatConfig)
+    : m_name(std::move(name)),
+      m_description(std::move(description)),
+      m_bindings(std::move(bindings)),
+      m_runtimeFloatConfig(std::move(runtimeFloatConfig)),
+      m_overlayEnabledPref(enabledByDefault),
+      m_enabledByDefault(enabledByDefault) {}
+
+std::expected<void, std::string>
+HookTweak::Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) {
+    if (m_bindings.empty()) {
+        return std::unexpected(
+            std::format("Hook tweak '{}' has no hook bindings", m_name));
+    }
+
+    m_overlayEnabledPref = config.GetBool(m_name, "Enabled", m_enabledByDefault);
     OnConfigLoaded(config);
 
-    // Standard multiplier path: clamp the configured float and stamp it into
-    // the shared hook context. Subclasses that need different behaviour can
-    // omit the MultiplierConfig and roll their own in OnConfigLoaded.
-    if (m_multiplierCfg) {
-        const auto& cfg = *m_multiplierCfg;
-        m_loadedMultiplier = std::clamp(
-            config.GetFloat(m_name, cfg.configKey, cfg.defaultValue),
-            cfg.clampMin, cfg.clampMax);
+    if (m_runtimeFloatConfig) {
+        const auto& runtimeFloat = *m_runtimeFloatConfig;
+        m_loadedMultiplier = LoadSliderValue(
+            config.GetFloat(m_name, runtimeFloat.configKey, runtimeFloat.slider.defaultValue),
+            runtimeFloat.slider);
         ApplyMultiplier(m_loadedMultiplier);
     }
 
-    // Register only; the actual pattern scan is batched in HookEngine::ResolveAll()
-    // by TweakManager. Address hooks still resolve immediately inside Register.
-    auto registerRes = m_target.pattern.empty()
-        ? hooks.RegisterAddressHook(m_name, m_target.address, m_detour)
-        : hooks.RegisterPatternHook(m_name, m_target.pattern, m_target.patternOffset, m_detour);
-    if (!registerRes) return registerRes;
+    auto makeSpec = [this](const HookBinding& b) {
+        return core::HookSiteSpec{
+            .name = b.siteName,
+            .group = m_name,
+            .minimumOverwriteLength = b.target.minimumOverwriteLength,
+            .continuation = b.target.continuation,
+        };
+    };
 
-    // Address-hook resume address is available immediately. For pattern-hooks
-    // GetResumeAddress will return nullopt here; we'll finish in FinalizeResolution.
-    if (m_target.pattern.empty()) {
-        auto resumeAddrOpt = hooks.GetResumeAddress(m_name);
-        if (!resumeAddrOpt) {
-            return std::unexpected(std::format("Address hook '{}' missing resume address", m_name));
+    for (const auto& binding : m_bindings) {
+        core::HookSiteSpec spec = makeSpec(binding);
+
+        auto registered = binding.target.pattern.empty()
+            ? hooks.RegisterAddressHook(
+                  std::move(spec), binding.target.address, binding.detour)
+            : hooks.RegisterPatternHook(
+                  std::move(spec),
+                  binding.target.pattern,
+                  binding.target.patternOffset,
+                  binding.detour);
+        if (!registered) {
+            UnregisterBindings(hooks);
+            return std::unexpected(std::format(
+                "{} [{}]", registered.error().message, binding.siteName));
         }
-        ApplyResolution(*resumeAddrOpt);
-        m_initialized = true;
     }
+
     return {};
 }
 
-std::expected<void, std::string> HookTweak::FinalizeResolution(jst::core::HookEngine& hooks) {
-    if (m_initialized) return {};   // already finished (address-hook path)
-
-    auto resumeAddrOpt = hooks.GetResumeAddress(m_name);
-    if (!resumeAddrOpt) {
-        return std::unexpected(std::format("Failed to resolve resume address for '{}'", m_name));
+std::expected<void, std::string>
+HookTweak::FinalizeResolution(jst::core::HookEngine& hooks) {
+    for (const auto& binding : m_bindings) {
+        auto continuation = hooks.GetContinuationAddress(binding.siteName);
+        if (!continuation) {
+            UnregisterBindings(hooks);
+            return std::unexpected(std::format(
+                "Hook site '{}' did not resolve", binding.siteName));
+        }
+        jst::hooks::GetContext(binding.slot).resumeAddress = *continuation;
     }
-    ApplyResolution(*resumeAddrOpt);
+
+    m_resolutionFinalized = true;
+    JST_LOG_INFO("Prepared hook group '{}' with {} site(s).",
+                 m_name, m_bindings.size());
+    return {};
+}
+
+std::expected<void, std::string>
+HookTweak::FinalizeInstallation(jst::core::HookEngine& hooks) {
+    if (!m_resolutionFinalized || !hooks.IsGroupInstalled(m_name)) {
+        m_initialized = false;
+        return std::unexpected(std::format(
+            "Hook group '{}' was not installed atomically", m_name));
+    }
+
     m_initialized = true;
+    if (m_runtimeFloatConfig) {
+        JST_LOG_INFO("Installed hook group '{}' | multiplier={} | sites={}",
+                     m_name, m_loadedMultiplier, m_bindings.size());
+    }
     return {};
 }
 
-void HookTweak::ApplyResolution(std::uintptr_t resumeAddress) {
-    auto& context = GetContext();
-    context.resumeAddress = resumeAddress;
-
-    if (m_multiplierCfg) {
-        JST_LOG_INFO("Hook installed | multiplier={} | resume=0x{:X}",
-                     m_loadedMultiplier, resumeAddress);
+void HookTweak::ApplyMultiplier(float multiplier) {
+    if (!m_runtimeFloatConfig || m_runtimeFloatConfig->writesToMultiplier) {
+        for (const auto& binding : m_bindings) {
+            jst::hooks::GetContext(binding.slot).multiplier = multiplier;
+        }
     }
-    OnHookResolved(context);
+    OnRuntimeFloatChanged(multiplier);
+}
+
+void HookTweak::UnregisterBindings(jst::core::HookEngine& hooks) {
+    for (const auto& binding : m_bindings) {
+        hooks.UnregisterHook(binding.siteName);
+    }
+    m_resolutionFinalized = false;
+    m_initialized = false;
 }
 
 std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
     std::vector<RuntimeControl> controls;
-    // Upper bound on what this base impl emits: enable checkbox + (optional)
-    // label separator + multiplier slider. Reserving up-front turns the
-    // per-frame push_back doublings into a single allocation.
     controls.reserve(3);
 
-    // Pre-launch toggle: writes [TweakName] Enabled to .ini. The hook itself
-    // can't be installed/uninstalled at runtime (the trampoline arena is
-    // sealed after HookEngine::InstallAll), so this checkbox is honestly a
-    // "next launch" setting. The renamed label + retitled tooltip make that
-    // visible without requiring the user to hover.
     controls.push_back(CheckboxControl{
-        .label         = "Load on launch",
-        .current       = m_configEnabled,
-        .defaultValue  = m_enabledByDefault,
-        .apply         = [this](bool v) { m_configEnabled = v; },
+        .label = "Load on launch",
+        .current = m_overlayEnabledPref,
+        .defaultValue = m_enabledByDefault,
+        .apply = [this](bool value) { m_overlayEnabledPref = value; },
         .configSection = m_name,
-        .configKey     = "Enabled",
-        .tooltip       = "Persists [<TweakName>] Enabled to the .ini. Takes effect on next "
-                         "game launch. The runtime slider below (if present) is the way to "
-                         "change behaviour immediately while playing.",
+        .configKey = "Enabled",
+        .tooltip =
+            "Persists [<TweakName>] Enabled to the .ini. Takes effect on next "
+            "game launch. Runtime controls below apply immediately.",
     });
 
-    // Runtime multiplier slider -- only available when the hook is installed.
-    if (m_multiplierCfg && m_initialized) {
-        const auto& cfg = *m_multiplierCfg;
-        // Visual cue separating the "next launch" toggle above from the
-        // immediate-effect slider below.
-        controls.push_back(LabelControl{ .label = "Live below \xe2\x86\x93" });  // ↓ (U+2193)
-        controls.push_back(SliderFloatControl{
-            .label         = cfg.sliderLabel.empty() ? cfg.configKey : cfg.sliderLabel,
-            .min           = cfg.clampMin,
-            .max           = cfg.clampMax,
-            .current       = m_loadedMultiplier,
-            .defaultValue  = cfg.defaultValue,
-            .apply         = [this](float v) {
-                m_loadedMultiplier = v;
-                ApplyMultiplier(v);
-                JST_LOG_INFO("{} multiplier -> {:.3f}", m_name, v);
+    if (m_runtimeFloatConfig && m_initialized) {
+        const auto& runtimeFloat = *m_runtimeFloatConfig;
+        controls.push_back(LabelControl{.label = "Live below \xe2\x86\x93"});
+        controls.push_back(MakeSliderFloatControl(
+            runtimeFloat.slider,
+            m_loadedMultiplier,
+            [this](float value) {
+                m_loadedMultiplier = value;
+                ApplyMultiplier(value);
+                JST_LOG_INFO("{} multiplier -> {:.3f}", m_name, value);
             },
-            .configSection = m_name,
-            .configKey     = cfg.configKey,
-            .tooltip       = cfg.sliderTooltip,
-        });
+            runtimeFloat.sliderLabel.empty() ? runtimeFloat.configKey : runtimeFloat.sliderLabel,
+            m_name,
+            runtimeFloat.configKey,
+            runtimeFloat.sliderTooltip));
     }
 
     return controls;
@@ -132,6 +176,7 @@ std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
 
 void HookTweak::Shutdown() {
     m_initialized = false;
+    m_resolutionFinalized = false;
 }
 
 } // namespace jst::tweaks

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "slider_utils.hpp"
+
 #include <functional>
 #include <string_view>
 #include <variant>
@@ -17,16 +19,53 @@ namespace jst::tweaks {
 /// passes `&current` to ImGui::SliderFloat and calls `apply(current)` when
 /// the value changes.
 struct SliderFloatControl {
-    std::string_view           label;
-    float                      min;
-    float                      max;
-    float                      current;                 // snapshot at GetRuntimeControls() call
-    float                      defaultValue;            // for Reset button
-    std::function<void(float)> apply;                   // overlay calls on slider change
-    std::string_view           configSection;           // for Save: which [section]
-    std::string_view           configKey;               // for Save: which key
-    std::string_view           tooltip;                 // optional ImGui tooltip text; empty == no tooltip
+    std::string_view label;
+    FloatSliderSpec spec;
+    float current = 0.0f;
+    std::function<void(float)> apply;
+    std::string_view configSection;
+    std::string_view configKey;
+    std::string_view tooltip;
 };
+
+[[nodiscard]] inline SliderFloatControl MakeSliderFloatControl(
+    FloatSliderSpec spec,
+    float current,
+    std::function<void(float)> apply,
+    std::string_view label,
+    std::string_view configSection,
+    std::string_view configKey,
+    std::string_view tooltip = {}) {
+    spec.defaultValue = DefaultSliderValue(spec);
+    return SliderFloatControl{
+        .label = label,
+        .spec = spec,
+        .current = LoadSliderValue(current, spec),
+        .apply = std::move(apply),
+        .configSection = configSection,
+        .configKey = configKey,
+        .tooltip = tooltip,
+    };
+}
+
+// Snap rawValue onto the spec grid and call apply() when it differs from the
+// tweak-owned baseline captured before ImGui mutated control.current.
+[[nodiscard]] inline bool TryCommitSliderEdit(SliderFloatControl& control,
+                                              float rawValue,
+                                              float persistedBaseline) {
+    const float normalized = NormalizeFloatSlider(rawValue, control.spec);
+    control.current = normalized;
+    if (SliderValuesNearlyEqual(normalized, persistedBaseline)) {
+        return false;
+    }
+    control.apply(control.current);
+    return true;
+}
+
+// Idle frame: restore the widget value from tweak-owned state.
+inline void RestoreSliderBaseline(SliderFloatControl& control, float persistedBaseline) {
+    control.current = persistedBaseline;
+}
 
 /// A boolean toggle that mutates a single bool value (e.g. a CVar enable
 /// flag).  `current` is a per-frame snapshot; the overlay passes `&current`
@@ -34,11 +73,11 @@ struct SliderFloatControl {
 struct CheckboxControl {
     std::string_view          label;
     bool                      current;
-    bool                      defaultValue;            // for Reset button
+    bool                      defaultValue;
     std::function<void(bool)> apply;
     std::string_view          configSection;
     std::string_view          configKey;
-    std::string_view          tooltip;                 // empty == no tooltip
+    std::string_view          tooltip;
 };
 
 /// A read-only informational line rendered as disabled text.  No `apply`

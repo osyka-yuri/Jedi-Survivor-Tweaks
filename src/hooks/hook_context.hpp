@@ -43,13 +43,13 @@ namespace jst::hooks {
 using Context = JstContext;
 
 enum class Slot : std::uint32_t {
-    LetterboxPillarboxFix = 0,
-    GameplayFOV      = 1,
-    CameraDistance   = 2,
-    AspectRatioUIFix = 3,
-    StreamingPoolFix = 4,
+#define JST_HOOK_SLOT(name) name,
+#include "slots.def"
+#undef JST_HOOK_SLOT
     Count
 };
+
+static_assert(std::to_underlying(Slot::Count) == 6);
 
 } // namespace jst::hooks
 

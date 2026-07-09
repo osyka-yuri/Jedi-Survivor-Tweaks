@@ -37,9 +37,13 @@ public:
     // Lifecycle management
     [[nodiscard]] virtual std::expected<void, std::string> Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) = 0;
     /// Called after HookEngine::ResolveAll(); hook-based tweaks read the
-    /// resolved resume address here. Default no-op suits CVar-only tweaks.
+    /// resolved continuation address here. Default no-op suits CVar-only tweaks.
     [[nodiscard]] virtual std::expected<void, std::string> FinalizeResolution(
-        [[maybe_unused]] jst::core::HookEngine& hooks) { return {}; }
+        [[maybe_unused]] jst::core::HookEngine& /*hooks*/) { return {}; }
+    /// Called after HookEngine::InstallAll(); hook-based tweaks publish their
+    /// initialized state only after every binding in their public group is live.
+    [[nodiscard]] virtual std::expected<void, std::string> FinalizeInstallation(
+        [[maybe_unused]] jst::core::HookEngine& /*hooks*/) { return {}; }
     virtual void Shutdown() = 0;
 
     // State query

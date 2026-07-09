@@ -1,0 +1,6 @@
+JST_HOOK_SLOT(LetterboxPillarboxFix)
+JST_HOOK_SLOT(GameplayFOV)
+JST_HOOK_SLOT(CameraDistance)
+JST_HOOK_SLOT(AspectRatioUIHud)
+JST_HOOK_SLOT(AspectRatioUIMenu)
+JST_HOOK_SLOT(StreamingPoolFix)

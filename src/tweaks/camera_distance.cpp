@@ -5,7 +5,7 @@ namespace {
     constexpr const char* kPattern =
         "0F ?? ?? 72 ?? 0F ?? ?? F3 0F ?? ?? ?? ?? ?? ?? F3 0F ?? ?? ?? ?? ?? ?? 0F ?? ?? F3 0F ?? ?? 0F ";
     constexpr int32_t kOffset = 0x8;
-}
+} // namespace
 
 namespace jst::tweaks {
 
@@ -16,6 +16,6 @@ CameraDistance::CameraDistance()
                 HookTarget::Pattern(kPattern, kOffset),
                 reinterpret_cast<std::uintptr_t>(&CameraDistance_Detour),
                 jst::hooks::Slot::CameraDistance,
-                MultiplierConfig{.defaultValue = 1.0f, .clampMin = 0.0f, .clampMax = 10.0f}) {}
+                RuntimeFloatConfig{}) {}
 
 } // namespace jst::tweaks

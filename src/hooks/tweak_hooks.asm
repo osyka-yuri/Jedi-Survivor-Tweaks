@@ -9,16 +9,12 @@
 ;   [r11 + 24] <padding>                  (8 bytes, alignas(16) pads 24 -> 32)
 ;   sizeof = 32, alignment = 16
 ;
-; SLOT_* below must match the order of jst::hooks::Slot in hook_context.hpp.
+; SLOT_* constants are generated from src/hooks/slots.def.
 
 EXTERN g_contexts : QWORD
 
 CONTEXT_SIZE EQU 32
-SLOT_LETTERBOXPILLARBOXFIX EQU 0
-SLOT_GAMEPLAYFOV      EQU 1
-SLOT_CAMERADISTANCE   EQU 2
-SLOT_ASPECTRATIOUIFIX EQU 3
-SLOT_STREAMINGPOOLFIX EQU 4
+INCLUDE tweak_hooks_slots.inc
 
 .CODE
 
@@ -26,58 +22,48 @@ SLOT_STREAMINGPOOLFIX EQU 4
 ; Macros for common naked detour boilerplate.
 ;
 ; JST_DETOUR_PROLOGUE slot_idx
-;   Reserves 8 bytes on the stack for the return address (sub rsp, 8) so that 
-;   the original stack alignment is preserved during the detour execution, and
-;   the resume address can be safely popped by `ret`.
-;   Saves r11 (used as context pointer) and rcx (often live/clobbered).
-;   Loads the context pointer into r11 and stores the resume address into
-;   the reserved stack slot.
+;   Saves r11 and loads the context pointer into r11.
 ;
 ; JST_DETOUR_EPILOGUE
-;   Restores rcx and r11, then issues `ret` which safely jumps back to the 
-;   resumeAddress placed at [rsp] by the detour body, perfectly restoring 
-;   original registers and stack pointer.
+;   Exchanges the saved r11 with the continuation address and returns without
+;   changing any other general-purpose register.
 ; ---------------------------------------------------------------------------
 JST_DETOUR_PROLOGUE MACRO slot_idx
-    sub rsp, 8
     push r11
-    push rcx
-
     lea r11, [g_contexts + slot_idx * CONTEXT_SIZE]
-    mov rcx, qword ptr [r11 + 0]
-    mov qword ptr [rsp + 16], rcx   ; store resume address in the reserved slot
 ENDM
 
 JST_DETOUR_EPILOGUE MACRO
-    pop rcx
-    pop r11
+    mov r11, qword ptr [r11 + 0]
+    xchg r11, qword ptr [rsp]
     ret
 ENDM
 
-; ---------------------------------------------------------------------------
-; AspectRatioUIFix
-;   The patched instruction holds a UI/HUD scale proportional to render height
-;   (~height/1440: 0.75 at 1920x1080, 0.8333 at 1920x1200, 1.1111 at 2560x1600).
-;   Because it is height-based, a 16:10 display -- 10/9 taller than 16:9 at the
-;   same width -- renders the UI 10/9 too large. The detour SCALES that value by
-;   Context::multiplier ([r11+8]) and re-runs the original 14-byte sequence:
-;       movaps xmm4, xmm0
-;       divss  xmm4, [rbp+1F8h]
-;       movaps xmm0, xmm4
-;   A factor of 0.9 (= 9/10) maps any 16:10 resolution onto its 16:9 equivalent
-;   (0.8333*0.9=0.75, 1.1111*0.9=1.0); 1.0 is a no-op, safe on any aspect ratio.
-;   mulss touches no GP register and no rflags, so only r11/rcx need saving.
-; ---------------------------------------------------------------------------
-AspectRatioUIFix_Detour PROC PUBLIC
-    JST_DETOUR_PROLOGUE SLOT_ASPECTRATIOUIFIX
+; =============================================================================
+; AspectRatioUIFix.Hud
+; =============================================================================
+AspectRatioUIFix_Hud_Detour PROC PUBLIC
+    JST_DETOUR_PROLOGUE SLOT_ASPECTRATIOUIHUD
 
-    mulss xmm0, dword ptr [r11 + 8] ; scale the UI value by the configured factor
-    movaps xmm4, xmm0               ; original 14-byte sequence follows
-    divss xmm4, dword ptr [rbp+000001F8h]
-    movaps xmm0, xmm4
+    mulss xmm0, dword ptr [r11 + 8]
 
     JST_DETOUR_EPILOGUE
-AspectRatioUIFix_Detour ENDP
+AspectRatioUIFix_Hud_Detour ENDP
+
+; ---------------------------------------------------------------------------
+; AspectRatioUIFix.Menu
+; Fragile: [rbp+1F8h] is a fixed stack-frame offset in the owning UI function.
+; Game updates that change frame layout will break this detour silently.
+; ---------------------------------------------------------------------------
+AspectRatioUIFix_Menu_Detour PROC PUBLIC
+    JST_DETOUR_PROLOGUE SLOT_ASPECTRATIOUIMENU
+
+    movaps xmm4, xmm0
+    divss xmm4, dword ptr [rbp+000001F8h]
+    mulss xmm4, dword ptr [r11 + 8]
+
+    JST_DETOUR_EPILOGUE
+AspectRatioUIFix_Menu_Detour ENDP
 
 ; ---------------------------------------------------------------------------
 ; LetterboxPillarboxFix - removes pillarboxing/letterboxing by disabling the
@@ -133,8 +119,8 @@ CameraDistance_Detour ENDP
 ; ---------------------------------------------------------------------------
 ; StreamingPoolFix - locks the streaming pool size to a configured number of GBs.
 ;
-; The 16-byte patch window (kAbsoluteJmpSize=14 -> HDE consumes 4 instructions
-; here) starting at the pattern's kOffset covers, verbatim:
+; The 16-byte patch window (kAbsoluteJmpSize=14, 4 instructions decoded by Zydis)
+; starting at the pattern's kOffset covers, verbatim:
 ;   patch+0 : 48 8B 54 24 40       mov rdx, [rsp+40h]        (5)  -- pool size
 ;   patch+5 : 84 C0                test al, al               (2)  -- flags from CALL
 ;   patch+7 : 74 16                jz +0x16                  (2)  -- skip recalc
@@ -157,14 +143,11 @@ StreamingPoolFix_Detour PROC PUBLIC
 
     JST_DETOUR_EPILOGUE                 ; ret -> resume (patch+16)
 
+; Fragile: +15 is tied to the 16-byte patch window and jz displacement (0x16).
 taken:
-    ; Same register restore as the epilogue, but the resume address in the
-    ; reserved slot points at patch+16; the jz wants patch+31, so add the
-    ; 15-byte delta before `ret` pops it. rcx/r11 are still on the stack
-    ; (nothing in the body pops them), so the pop order matches the epilogue.
-    pop  rcx
-    pop  r11
-    add  qword ptr [rsp], 15            ; resume + 0x0F -> patch+31 (jz target)
+    mov  r11, qword ptr [r11 + 0]
+    add  r11, 15                         ; resume + 0x0F -> patch+31 (jz target)
+    xchg r11, qword ptr [rsp]
     ret
 StreamingPoolFix_Detour ENDP
 

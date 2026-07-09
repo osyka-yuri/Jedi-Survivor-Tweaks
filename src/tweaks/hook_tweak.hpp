@@ -1,59 +1,77 @@
 #pragma once
 
-#include "tweak.hpp"
+#include "core/hook_types.hpp"
 #include "hooks/hook_context.hpp"
+#include "slider_specs.hpp"
+#include "tweak.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace jst::tweaks {
 
-/// Describes the location of a code-patch hook target. Exactly one of the two
-/// addressing modes should be populated:
-///   - pattern is non-empty -> resolve target via byte-pattern scan
-///   - pattern is empty     -> use `address` as RVA in the game module
 struct HookTarget {
     std::string pattern;
     int32_t patternOffset = 0;
     std::uintptr_t address = 0;
+    size_t minimumOverwriteLength = 5;
+    core::HookContinuation continuation = core::HookContinuation::Resume;
 
-    [[nodiscard]] static HookTarget Pattern(std::string_view sig, int32_t offset = 0) {
-        return HookTarget{std::string(sig), offset, 0};
+    [[nodiscard]] static HookTarget Pattern(
+        std::string_view signature,
+        int32_t offset = 0,
+        size_t minimumLength = 5,
+        core::HookContinuation continuation = core::HookContinuation::Resume) {
+        return HookTarget{
+            std::string(signature),
+            offset,
+            0,
+            minimumLength,
+            continuation,
+        };
     }
-    [[nodiscard]] static HookTarget Address(std::uintptr_t rva) {
-        return HookTarget{{}, 0, rva};
+
+    [[nodiscard]] static HookTarget Address(
+        std::uintptr_t rva,
+        size_t minimumLength = 5,
+        core::HookContinuation continuation = core::HookContinuation::Resume) {
+        return HookTarget{{}, 0, rva, minimumLength, continuation};
     }
 };
 
-/// Optional standard behavior for hook tweaks that expose a single
-/// `Multiplier` config key feeding `Context::multiplier`. When supplied, the
-/// base class:
-///   1. Reads `[Name()] / configKey` from config, clamped to [clampMin, clampMax].
-///   2. Writes it to `GetContext().multiplier`.
-///   3. Logs a uniform "Hook installed | multiplier=... | resume=..." line.
-/// Subclasses with non-standard config or no multiplier should omit this.
-struct MultiplierConfig {
+struct HookBinding {
+    std::string siteName;
+    HookTarget target;
+    std::uintptr_t detour = 0;
+    jst::hooks::Slot slot{};
+};
+
+struct RuntimeFloatConfig {
+    FloatSliderSpec slider = kMultiplierSliderSpec;
     std::string_view configKey = "Multiplier";
-    float defaultValue = 1.0f;
-    float clampMin = 0.0f;
-    float clampMax = 10.0f;
-    // Optional overrides for the runtime slider's label/tooltip. Empty
-    // sliderLabel falls back to configKey; sliderTooltip defaults to the
-    // generic "multiplier" wording. String_views must point at stable storage
-    // (string literals or owning members), per runtime_control.hpp.
     std::string_view sliderLabel{};
-    std::string_view sliderTooltip = "Multiplier applied at runtime. Takes effect immediately.";
+    std::string_view sliderTooltip =
+        "Multiplier applied at runtime. Takes effect immediately.";
+    bool writesToMultiplier = true;
 };
 
-/// Unified hook-based tweak base class. Concrete tweaks supply a `HookTarget`,
-/// a detour routine, and a context slot at construction. Optional virtual hooks
-/// `OnConfigLoaded`/`OnHookResolved` allow injecting per-tweak behaviour.
 class HookTweak : public ITweak {
 public:
-    HookTweak(std::string name, std::string description, bool enabledByDefault,
-              HookTarget target, std::uintptr_t detour, jst::hooks::Slot slot,
-              std::optional<MultiplierConfig> multiplierCfg = std::nullopt);
+    HookTweak(std::string name,
+              std::string description,
+              bool enabledByDefault,
+              HookTarget target,
+              std::uintptr_t detour,
+              jst::hooks::Slot slot,
+              std::optional<RuntimeFloatConfig> runtimeFloatConfig = std::nullopt);
+    HookTweak(std::string name,
+              std::string description,
+              bool enabledByDefault,
+              std::vector<HookBinding> bindings,
+              std::optional<RuntimeFloatConfig> runtimeFloatConfig = std::nullopt);
     ~HookTweak() override = default;
 
     HookTweak(const HookTweak&) = delete;
@@ -61,56 +79,45 @@ public:
     HookTweak(HookTweak&&) = delete;
     HookTweak& operator=(HookTweak&&) = delete;
 
-    [[nodiscard]] std::expected<void, std::string> Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) override;
-    [[nodiscard]] std::expected<void, std::string> FinalizeResolution(jst::core::HookEngine& hooks) override;
+    [[nodiscard]] std::expected<void, std::string>
+    Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) override;
+    [[nodiscard]] std::expected<void, std::string>
+    FinalizeResolution(jst::core::HookEngine& hooks) override;
+    [[nodiscard]] std::expected<void, std::string>
+    FinalizeInstallation(jst::core::HookEngine& hooks) override;
     void Shutdown() override;
+
     [[nodiscard]] bool IsInitialized() const override { return m_initialized; }
-
-    [[nodiscard]] std::string_view Name() const override { return m_name; }
-    [[nodiscard]] std::string_view Description() const override { return m_description; }
-    [[nodiscard]] bool IsEnabledByDefault() const override { return m_enabledByDefault; }
-
+    [[nodiscard]] std::string_view Name() const noexcept override { return m_name; }
+    [[nodiscard]] std::string_view Description() const noexcept override { return m_description; }
+    [[nodiscard]] bool IsEnabledByDefault() const noexcept override { return m_enabledByDefault; }
     [[nodiscard]] std::vector<RuntimeControl> GetRuntimeControls() override;
 
 protected:
     virtual void OnConfigLoaded(jst::core::Config& /*config*/) {}
-    virtual void OnHookResolved(const jst::hooks::Context& /*context*/) {}
-    virtual void OnMultiplierChanged(float /*value*/) {}
+    virtual void OnRuntimeFloatChanged(float /*value*/) {}
 
-    [[nodiscard]] jst::hooks::Context& GetContext() const { return jst::hooks::GetContext(m_slot); }
-
-    // Updates the multiplier value and triggers `OnMultiplierChanged` to sync
-    // any slot-specific derivative data. Always use this instead of directly
-    // modifying the multiplier field.
-    void ApplyMultiplier(float m) {
-        GetContext().multiplier = m;
-        OnMultiplierChanged(m);
+    [[nodiscard]] jst::hooks::Context& PrimaryContext() const {
+        return jst::hooks::GetContext(m_bindings.front().slot);
     }
 
-    void SetPayload0(uint64_t value) { GetContext().payload0 = value; }
-    [[nodiscard]] uint64_t GetPayload0() const { return GetContext().payload0; }
-
-    // Last value loaded by the standard MultiplierConfig path. 0.0f if no
-    // MultiplierConfig was provided.  Updated by the runtime slider so that
-    // re-enabling the tweak restores the user's current slider position.
+    void ApplyMultiplier(float multiplier);
+    void SetPayload0(uint64_t value) { PrimaryContext().payload0 = value; }
+    [[nodiscard]] uint64_t GetPayload0() const { return PrimaryContext().payload0; }
     [[nodiscard]] float LoadedMultiplier() const noexcept { return m_loadedMultiplier; }
 
 private:
-    /// Common tail of Initialize (address-hook) and FinalizeResolution
-    /// (pattern-hook): stamps resume address, logs, calls OnHookResolved.
-    void ApplyResolution(std::uintptr_t resumeAddress);
-
+    void UnregisterBindings(jst::core::HookEngine& hooks);
 
     std::string m_name;
     std::string m_description;
-    HookTarget m_target;
-    std::uintptr_t m_detour = 0;
-    jst::hooks::Slot m_slot;
-    std::optional<MultiplierConfig> m_multiplierCfg;
+    std::vector<HookBinding> m_bindings;
+    std::optional<RuntimeFloatConfig> m_runtimeFloatConfig;
     float m_loadedMultiplier = 0.0f;
-    bool  m_configEnabled;               // mirrors [TweakName] Enabled in .ini
-    bool  m_enabledByDefault = false;
-    bool  m_initialized      = false;
+    bool m_overlayEnabledPref = false;
+    bool m_enabledByDefault = false;
+    bool m_resolutionFinalized = false;
+    bool m_initialized = false;
 };
 
 } // namespace jst::tweaks

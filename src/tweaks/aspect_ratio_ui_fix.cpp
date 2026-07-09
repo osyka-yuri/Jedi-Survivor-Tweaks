@@ -1,35 +1,54 @@
 #include "aspect_ratio_ui_fix.hpp"
+
 #include "hooks/tweak_hooks.hpp"
+#include "slider_specs.hpp"
 
 namespace {
-    // Original instructions at the patch site (14 bytes total):
-    //   movaps xmm4, xmm0          ; 0F 28 E0
-    //   divss  xmm4, [rbp+1F8h]    ; F3 0F 5E A5 F8 01 00 00
-    //   movaps xmm0, xmm4          ; 0F 28 C4
-    constexpr const char* kPattern = "0F 28 E0 F3 0F 5E A5 F8 01 00 00 0F 28 C4";
-    constexpr int32_t kOffset = 0;
 
-    // The patched instruction holds a UI scale proportional to render height
-    // (~height/1440), so a 16:10 display -- 10/9 taller than 16:9 at the same
-    // width -- gets a UI 10/9 too large. The detour multiplies that value by
-    // Multiplier, so a factor of 0.9 (= 9/10) maps ANY 16:10 resolution onto its
-    // 16:9 equivalent (1.1111*0.9=1.0, 0.8333*0.9=0.75) while 1.0 is a no-op,
-    // safe on any aspect ratio. Default is the 16:10 fix; the range allows
-    // fine-tuning plus modest up/down UI scaling.
-    constexpr float kDefaultMultiplier = 0.9f;
-    constexpr float kMultiplierMin     = 0.5f;
-    constexpr float kMultiplierMax     = 1.5f;
-}
+constexpr const char* kHudPattern =
+    "0F 28 F0 48 8B 05 ? ? ? ? 0F 28 C6 F3 0F 11 35 ? ? ? ? "
+    "0F 28 74 24 20 48 89 05 ? ? ? ? C6 05 ? ? ? ? 01 "
+    "48 83 C4 30 5B C3";
+constexpr const char* kMenuPattern =
+    "0F 28 E0 F3 0F 5E A5 F8 01 00 00 0F 28 C4";
+
+} // namespace
 
 namespace jst::tweaks {
 
 AspectRatioUIFix::AspectRatioUIFix()
-    : HookTweak("AspectRatioUIFix",
-                "Fixes oversized UI on 16:10 displays. The game scales the UI by a height-based factor, so 16:10 (10/9 taller than 16:9) is 10/9 too large. Multiplier MULTIPLIES that factor: 0.9 maps any 16:10 resolution to its 16:9 equivalent (default), 1.0 = no change. Resolution-independent. Range 0.5-1.5.",
-                false,
-                HookTarget::Pattern(kPattern, kOffset),
-                reinterpret_cast<std::uintptr_t>(&AspectRatioUIFix_Detour),
-                jst::hooks::Slot::AspectRatioUIFix,
-                MultiplierConfig{.defaultValue = kDefaultMultiplier, .clampMin = kMultiplierMin, .clampMax = kMultiplierMax}) {}
+    : HookTweak(
+          "AspectRatioUIFix",
+          "Scales the HUD, 3D map markers, and menus to correct oversized UI "
+          "on 16:10 displays.",
+          false,
+          std::vector<HookBinding>{
+              HookBinding{
+                  .siteName = "AspectRatioUIFix.Hud",
+                  // ReplayOriginal over the 5-byte movaps prologue so the detour
+                  // scales xmm0 before the relocated instruction stores it.
+                  .target = HookTarget::Pattern(
+                      kHudPattern,
+                      0,
+                      5,
+                      core::HookContinuation::ReplayOriginal),
+                  .detour =
+                      reinterpret_cast<std::uintptr_t>(&AspectRatioUIFix_Hud_Detour),
+                  .slot = jst::hooks::Slot::AspectRatioUIHud,
+              },
+              HookBinding{
+                  .siteName = "AspectRatioUIFix.Menu",
+                  .target = HookTarget::Pattern(kMenuPattern, 0, 11),
+                  .detour =
+                      reinterpret_cast<std::uintptr_t>(&AspectRatioUIFix_Menu_Detour),
+                  .slot = jst::hooks::Slot::AspectRatioUIMenu,
+              },
+          },
+          RuntimeFloatConfig{
+              .slider = kAspectRatioSliderSpec,
+              .sliderTooltip =
+                  "UI scale multiplier applied to the HUD, 3D markers, and menus. "
+                  "0.9 corrects 16:10; 1.0 leaves the game scale unchanged.",
+          }) {}
 
 } // namespace jst::tweaks

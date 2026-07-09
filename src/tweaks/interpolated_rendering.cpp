@@ -2,7 +2,6 @@
 #include "core/cvar_system.hpp"
 #include "core/config.hpp"
 #include "core/logging.hpp"
-#include <array>
 
 namespace jst::tweaks {
 

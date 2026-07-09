@@ -10,7 +10,7 @@ namespace {
     //   mov eax, [rbx+02C8h]       ; read aspect-ratio constraint flag
     // Total replaced: 6+3+6 = 15 bytes >= kAbsoluteJmpSize (14).
     constexpr int32_t kOffset = 0x0F;
-}
+} // namespace
 
 namespace jst::tweaks {
 
@@ -18,7 +18,7 @@ LetterboxPillarboxFix::LetterboxPillarboxFix()
     : HookTweak("LetterboxPillarboxFix",
                 "Removes pillarboxing/letterboxing in cutscenes by disabling aspect ratio constraints.",
                 true,
-                HookTarget::Pattern(kPattern, kOffset),
+                HookTarget::Pattern(kPattern, kOffset, 15),
                 reinterpret_cast<std::uintptr_t>(&LetterboxPillarboxFix_Detour),
                 jst::hooks::Slot::LetterboxPillarboxFix) {}
 

@@ -71,13 +71,16 @@
     <TargetName>JediSurvivorTweaks</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <PreBuildEvent>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)scripts\generate_hook_slots.ps1"</Command>
+    </PreBuildEvent>
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;_DEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;ZYDIS_STATIC_BUILD;_DEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\external;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\external;$(ProjectDir)src\external\zydis;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/FS /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -89,18 +92,21 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <PreBuildEvent>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)scripts\generate_hook_slots.ps1"</Command>
+    </PreBuildEvent>
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
-      <Optimization>MinSpace</Optimization>
-      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
+      <Optimization>MaxSpeed</Optimization>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <StringPooling>true</StringPooling>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;NDEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;ZYDIS_STATIC_BUILD;NDEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\external;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\external;$(ProjectDir)src\external\zydis;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/FS /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -114,18 +120,21 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAddon|x64'">
+    <PreBuildEvent>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)scripts\generate_hook_slots.ps1"</Command>
+    </PreBuildEvent>
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
-      <Optimization>MinSpace</Optimization>
-      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
+      <Optimization>MaxSpeed</Optimization>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <StringPooling>true</StringPooling>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;NDEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;ZYDIS_STATIC_BUILD;NDEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\external;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\external;$(ProjectDir)src\external\zydis;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/FS /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -152,9 +161,16 @@
       <!-- ImGui overlay: built only into ReleaseAddon. -->
       <ExcludedFromBuild Condition="'$(Configuration)'!='ReleaseAddon'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="src\reshade\control_renderer.cpp">
+      <!-- ImGui control renderer: built only into ReleaseAddon. -->
+      <ExcludedFromBuild Condition="'$(Configuration)'!='ReleaseAddon'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\main_app.cpp" />
     <ClCompile Include="src\core\config.cpp" />
     <ClCompile Include="src\core\hook_engine.cpp" />
+    <ClCompile Include="src\core\hook_transaction.cpp" />
+    <ClCompile Include="src\core\instruction_relocator.cpp" />
+    <ClCompile Include="src\core\gateway_allocator.cpp" />
     <ClCompile Include="src\core\logging.cpp" />
     <ClCompile Include="src\core\memory_scanner.cpp" />
     <ClCompile Include="src\core\cvar_resolver.cpp" />
@@ -168,25 +184,33 @@
     <ClCompile Include="src\tweaks\gameplay_fov.cpp" />
     <ClCompile Include="src\tweaks\camera_distance.cpp" />
     <ClCompile Include="src\tweaks\aspect_ratio_ui_fix.cpp" />
+    <ClCompile Include="src\external\zydis\Zydis.c">
+      <!-- Vendored Zydis 4.1.1 (monolithic MIT single-file build). Lower warning level
+           prevents upstream noise from affecting our /W4 build. -->
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
     <ClCompile Include="src\tweaks\graphical_tweaks.cpp" />
     <ClCompile Include="src\tweaks\interpolated_rendering.cpp" />
     <ClCompile Include="src\tweaks\custom_cvars.cpp" />
     <ClCompile Include="src\tweaks\streaming_pool_fix.cpp" />
-    <ClCompile Include="src\external\hde64\hde64.c">
-      <!-- Vendored disassembler: keep its baseline warning level so upstream
-           noise doesn't pollute our W4 build. -->
-      <WarningLevel>Level3</WarningLevel>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\main_app.hpp" />
     <ClInclude Include="src\core\config.hpp" />
+    <ClInclude Include="src\core\debounce_timer.hpp" />
     <ClInclude Include="src\core\ini_helpers.hpp" />
     <ClInclude Include="src\core\cvar_overrides.hpp" />
     <ClInclude Include="src\core\cvar_resolver.hpp" />
     <ClInclude Include="src\core\cvar_scanner.hpp" />
     <ClInclude Include="src\core\cvar_system.hpp" />
+    <ClInclude Include="src\core\hook.hpp" />
     <ClInclude Include="src\core\hook_engine.hpp" />
+    <ClInclude Include="src\core\scoped_virtual_protect.hpp" />
+    <ClInclude Include="src\core\thread_suspender.hpp" />
+    <ClInclude Include="src\core\hook_transaction.hpp" />
+    <ClInclude Include="src\core\hook_types.hpp" />
+    <ClInclude Include="src\core\instruction_relocator.hpp" />
+    <ClInclude Include="src\core\gateway_allocator.hpp" />
     <ClInclude Include="src\core\logging.hpp" />
     <ClInclude Include="src\core\memory_scanner.hpp" />
     <ClInclude Include="src\core\pe_types.hpp" />
@@ -195,6 +219,7 @@
     <ClInclude Include="src\hooks\hook_context.hpp" />
     <ClInclude Include="src\hooks\tweak_hooks.hpp" />
     <ClInclude Include="src\tweaks\runtime_control.hpp" />
+    <ClInclude Include="src\tweaks\slider_utils.hpp" />
     <ClInclude Include="src\tweaks\tweak.hpp" />
     <ClInclude Include="src\tweaks\tweak_manager.hpp" />
     <ClInclude Include="src\tweaks\hook_tweak.hpp" />
@@ -206,8 +231,9 @@
     <ClInclude Include="src\tweaks\interpolated_rendering.hpp" />
     <ClInclude Include="src\tweaks\custom_cvars.hpp" />
     <ClInclude Include="src\tweaks\streaming_pool_fix.hpp" />
-    <ClInclude Include="src\external\hde64\hde64.h" />
+
     <ClInclude Include="src\reshade\overlay.hpp" />
+    <ClInclude Include="src\reshade\control_renderer.hpp" />
     <ClInclude Include="src\external\reshade\imgui_compat.hpp" />
     <ClInclude Include="src\external\reshade\reshade.hpp" />
     <ClInclude Include="src\external\reshade\reshade_api.hpp" />
