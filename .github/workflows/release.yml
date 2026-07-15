@@ -77,16 +77,6 @@ jobs:
         cp config/JediSurvivorTweaks.ini addon_zip/
         Compress-Archive -Path addon_zip/* -DestinationPath JediSurvivorTweaks_${version}_ReShadeAddon.zip
 
-    - name: Create checksums
-      shell: pwsh
-      run: |
-        Get-ChildItem JediSurvivorTweaks_*.zip |
-          Sort-Object Name |
-          ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $($_.Name)"
-          } | Set-Content SHA256SUMS.txt -Encoding ascii
-
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v3
       if: startsWith(github.ref, 'refs/tags/')
@@ -95,6 +85,5 @@ jobs:
         files: |
           JediSurvivorTweaks_*_ASI.zip
           JediSurvivorTweaks_*_ReShadeAddon.zip
-          SHA256SUMS.txt
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
