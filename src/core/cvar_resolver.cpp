@@ -6,6 +6,9 @@
 #include "pe_utils.hpp"
 #include "string_utils.hpp"
 
+#include <bit>
+#include <cmath>
+
 namespace jst::core {
 
 namespace {
@@ -21,13 +24,14 @@ ResolvedCVar MakeResolvedCVar(uintptr_t obj, const CVarOverride* override) {
 }
 
 // Strict whitelist of values commonly used to initialise CVars at startup.
-bool IsValidCVarDefault(int32_t valAsInt) {
+bool IsValidCVarDefault(int32_t valAsInt) noexcept {
     if (valAsInt == 0) return true;
     if (valAsInt > 0 && valAsInt <= 4096) return true;
     if (valAsInt >= -100 && valAsInt < 0) return true;
 
-    const float valAsFloat = *reinterpret_cast<const float*>(&valAsInt);
-    if (std::isfinite(valAsFloat) && !std::isnan(valAsFloat) &&
+    const float valAsFloat = std::bit_cast<float>(valAsInt);
+    if (std::fpclassify(valAsFloat) == FP_SUBNORMAL) return false;
+    if (std::isfinite(valAsFloat) &&
         valAsFloat >= -10000.0f && valAsFloat <= 10000.0f) {
         return true;
     }

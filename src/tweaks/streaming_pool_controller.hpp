@@ -15,7 +15,7 @@ enum class StreamingPoolState : uint8_t {
     Manual,
     WaitingForEngine,
     LockedFromCVar,
-    LockedFromDetour,
+    LockedFromPathSample,
     Fallback,
 };
 
@@ -24,7 +24,7 @@ enum class EnginePoolObservation : uint8_t {
     RejectedBelowMinimum,
     RejectedAboveMaximum,
     LockedFromCVar,
-    LockedFromDetour,
+    LockedFromPathSample,
     Inactive,
 };
 
@@ -60,7 +60,8 @@ public:
 
     [[nodiscard]] EnginePoolObservation ObserveEnginePoolMb(int32_t poolSizeMb);
     void OnAutoTimeout();
-    [[nodiscard]] bool PullDetourIfWaiting();
+    // Secondary Auto source after an unusable CVar tick or timeout.
+    [[nodiscard]] bool TryAdoptPathSample();
 
     [[nodiscard]] StreamingPoolSnapshot Snapshot() const;
     [[nodiscard]] bool IsWaitingForEngine() const;
@@ -69,33 +70,21 @@ private:
     class PayloadPort final {
     public:
         void Bind(jst::core::StreamingPoolPayload& payload) noexcept;
-        [[nodiscard]] bool IsBound() const noexcept { return m_payload != nullptr; }
-        [[nodiscard]] uint64_t LoadLock(uint64_t fallback = 0) const noexcept;
-        void StoreLock(uint64_t value) const noexcept;
-        [[nodiscard]] bool CompareExchangeLock(uint64_t& expected, uint64_t desired) const noexcept;
+        void StoreForced(uint64_t value) const noexcept;
         void PublishPolicy(uint64_t ceiling, uint64_t fallback) const noexcept;
+        [[nodiscard]] uint64_t LoadFirstObserved() const noexcept;
 
     private:
         jst::core::StreamingPoolPayload* m_payload = nullptr;
     };
 
-    enum class AutoReconcileResult : uint8_t {
-        Waiting,
-        Captured,
-        Fallback,
-    };
-
     // Caller holds m_mutex for every method suffixed Locked.
-    [[nodiscard]] uint64_t CeilingBytesLocked() const noexcept;
-    [[nodiscard]] uint64_t FallbackBytesLocked() const noexcept;
     void PublishPolicyLocked() const noexcept;
-    void EnterWaitingLocked();
+    void EnterAutoWaitingLocked();
+    void PublishSafeHoldLocked();
     void PublishLockLocked(uint64_t bytes, StreamingPoolState state, int32_t engineMb = 0);
-    void AdoptDetourLocked(uint64_t bytes);
     void PublishFallbackLocked();
-    [[nodiscard]] AutoReconcileResult ReconcileOpenAutoPolicyLocked();
-    [[nodiscard]] bool TryAdoptLiveDetourLocked();
-    [[nodiscard]] bool TryAcquireCVarLockLocked(uint64_t bytes, int32_t engineMb);
+    [[nodiscard]] bool TryAdoptPathSampleLocked();
     void RecordRejectionLocked(int32_t poolSizeMb, EnginePoolCandidateValidity reason);
 
     PoolSizePolicy m_policy;

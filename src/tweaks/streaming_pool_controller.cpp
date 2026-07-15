@@ -26,12 +26,15 @@ std::string FormatStreamingPoolStatus(const StreamingPoolSnapshot& snapshot) {
         break;
     case StreamingPoolState::WaitingForEngine:
         status = "Waiting for engine pool size...";
+        if (snapshot.lockedBytes != 0) {
+            status += std::format(" (holding {:.1f} GB)", snapshot.effectiveGb);
+        }
         break;
     case StreamingPoolState::LockedFromCVar:
         status = std::format("Locked to engine: {:.2f} GB ({} MB)",
                              snapshot.effectiveGb, snapshot.enginePoolMb);
         break;
-    case StreamingPoolState::LockedFromDetour:
+    case StreamingPoolState::LockedFromPathSample:
         status = std::format("Locked to engine: {:.2f} GB (streaming path)",
                              snapshot.effectiveGb);
         break;
@@ -69,28 +72,11 @@ void StreamingPoolController::PayloadPort::Bind(
     m_payload = &payload;
 }
 
-uint64_t StreamingPoolController::PayloadPort::LoadLock(uint64_t fallback) const noexcept {
-    if (!m_payload) {
-        return fallback;
-    }
-    return std::atomic_ref<uint64_t>(m_payload->lockedBytes)
-        .load(std::memory_order_acquire);
-}
-
-void StreamingPoolController::PayloadPort::StoreLock(uint64_t value) const noexcept {
+void StreamingPoolController::PayloadPort::StoreForced(uint64_t value) const noexcept {
     if (m_payload) {
-        std::atomic_ref<uint64_t>(m_payload->lockedBytes)
+        std::atomic_ref<uint64_t>(m_payload->forcedBytes)
             .store(value, std::memory_order_release);
     }
-}
-
-bool StreamingPoolController::PayloadPort::CompareExchangeLock(
-    uint64_t& expected, uint64_t desired) const noexcept {
-    if (!m_payload) {
-        return false;
-    }
-    return std::atomic_ref<uint64_t>(m_payload->lockedBytes).compare_exchange_strong(
-        expected, desired, std::memory_order_acq_rel, std::memory_order_acquire);
 }
 
 void StreamingPoolController::PayloadPort::PublishPolicy(
@@ -104,26 +90,24 @@ void StreamingPoolController::PayloadPort::PublishPolicy(
         .store(fallback, std::memory_order_release);
 }
 
-uint64_t StreamingPoolController::CeilingBytesLocked() const noexcept {
-    return m_policy.limits.maximumBytes;
-}
-
-uint64_t StreamingPoolController::FallbackBytesLocked() const noexcept {
-    return m_policy.limits.fallbackBytes;
+uint64_t StreamingPoolController::PayloadPort::LoadFirstObserved() const noexcept {
+    if (!m_payload) {
+        return 0;
+    }
+    return std::atomic_ref<uint64_t>(m_payload->firstObservedEngineBytes)
+        .load(std::memory_order_acquire);
 }
 
 void StreamingPoolController::PublishPolicyLocked() const noexcept {
-    m_payload.PublishPolicy(CeilingBytesLocked(), FallbackBytesLocked());
+    m_payload.PublishPolicy(
+        m_policy.limits.maximumBytes, m_policy.limits.fallbackBytes);
 }
 
-void StreamingPoolController::EnterWaitingLocked() {
-    PublishPolicyLocked();
-    m_lockedBytes = 0;
-    m_effectiveGb = m_policy.limits.FallbackGb();
+void StreamingPoolController::EnterAutoWaitingLocked() {
     m_enginePoolMb = 0;
     m_lastRejectedCandidate.reset();
     m_state = StreamingPoolState::WaitingForEngine;
-    m_payload.StoreLock(0);
+    PublishSafeHoldLocked();
 }
 
 void StreamingPoolController::PublishLockLocked(
@@ -133,104 +117,29 @@ void StreamingPoolController::PublishLockLocked(
     m_enginePoolMb = engineMb;
     m_lastRejectedCandidate.reset();
     m_state = state;
-    m_payload.StoreLock(bytes);
-}
-
-void StreamingPoolController::AdoptDetourLocked(uint64_t bytes) {
-    PublishLockLocked(bytes, StreamingPoolState::LockedFromDetour);
+    m_payload.StoreForced(bytes);
 }
 
 void StreamingPoolController::PublishFallbackLocked() {
-    PublishLockLocked(FallbackBytesLocked(), StreamingPoolState::Fallback);
+    PublishLockLocked(m_policy.limits.fallbackBytes, StreamingPoolState::Fallback);
 }
 
-StreamingPoolController::AutoReconcileResult
-StreamingPoolController::ReconcileOpenAutoPolicyLocked() {
-    if (!m_payload.IsBound()) {
-        PublishPolicyLocked();
-        return AutoReconcileResult::Waiting;
-    }
-
-    const uint64_t fallback = FallbackBytesLocked();
-    uint64_t observed = 0;
-    for (;;) {
-        // Temporarily force a safe value while replacing the policy words.
-        // If this succeeds no detour capture can race the publication.
-        if (observed == 0 && m_payload.CompareExchangeLock(observed, fallback)) {
-            PublishPolicyLocked();
-            m_payload.StoreLock(0);
-            return AutoReconcileResult::Waiting;
-        }
-
-        if (observed != 0 && IsPoolSizeWithinLimits(observed, m_policy.limits)) {
-            PublishPolicyLocked();
-            AdoptDetourLocked(observed);
-            return AutoReconcileResult::Captured;
-        }
-
-        if (observed != 0) {
-            uint64_t expected = observed;
-            if (m_payload.CompareExchangeLock(expected, fallback)) {
-                PublishPolicyLocked();
-                PublishFallbackLocked();
-                return AutoReconcileResult::Fallback;
-            }
-            observed = expected;
-            continue;
-        }
-
-        observed = m_payload.LoadLock(0);
-    }
-}
-
-bool StreamingPoolController::TryAdoptLiveDetourLocked() {
-    if (m_state != StreamingPoolState::WaitingForEngine || !m_payload.IsBound()) {
+bool StreamingPoolController::TryAdoptPathSampleLocked() {
+    const uint64_t observed = m_payload.LoadFirstObserved();
+    if (observed == 0 || !IsPoolSizeWithinLimits(observed, m_policy.limits)) {
         return false;
     }
-
-    uint64_t observed = m_payload.LoadLock(0);
-    while (observed != 0) {
-        if (IsPoolSizeWithinLimits(observed, m_policy.limits)) {
-            AdoptDetourLocked(observed);
-            return true;
-        }
-
-        uint64_t expected = observed;
-        if (m_payload.CompareExchangeLock(expected, 0)) {
-            return false;
-        }
-        observed = expected;
-    }
-    return false;
+    PublishLockLocked(observed, StreamingPoolState::LockedFromPathSample);
+    return true;
 }
 
-bool StreamingPoolController::TryAcquireCVarLockLocked(uint64_t bytes, int32_t engineMb) {
-    if (m_state != StreamingPoolState::WaitingForEngine) {
-        return false;
+void StreamingPoolController::PublishSafeHoldLocked() {
+    if (m_lockedBytes == 0 || !IsPoolSizeWithinLimits(m_lockedBytes, m_policy.limits)) {
+        m_lockedBytes = m_policy.limits.fallbackBytes;
     }
-    if (!m_payload.IsBound()) {
-        PublishLockLocked(bytes, StreamingPoolState::LockedFromCVar, engineMb);
-        return true;
-    }
-
-    uint64_t observed = 0;
-    for (;;) {
-        if (m_payload.CompareExchangeLock(observed, bytes)) {
-            PublishLockLocked(bytes, StreamingPoolState::LockedFromCVar, engineMb);
-            return true;
-        }
-        if (observed != 0 && IsPoolSizeWithinLimits(observed, m_policy.limits)) {
-            AdoptDetourLocked(observed);
-            return false;
-        }
-
-        uint64_t expected = observed;
-        if (observed != 0 && m_payload.CompareExchangeLock(expected, 0)) {
-            observed = 0;
-            continue;
-        }
-        observed = expected;
-    }
+    m_effectiveGb = PoolSizeBytesToGb(m_lockedBytes);
+    m_payload.StoreForced(m_lockedBytes);
+    PublishPolicyLocked();
 }
 
 void StreamingPoolController::RecordRejectionLocked(
@@ -245,27 +154,24 @@ void StreamingPoolController::BindPayload(jst::core::StreamingPoolPayload& paylo
     std::lock_guard lock(m_mutex);
     m_payload.Bind(payload);
 
-    if (m_state == StreamingPoolState::WaitingForEngine ||
-        m_state == StreamingPoolState::Unconfigured) {
-        const auto priorState = m_state;
-        const auto result = ReconcileOpenAutoPolicyLocked();
-        if (priorState == StreamingPoolState::Unconfigured) {
-            // Preserve the lifecycle state. ArmAuto will adopt any valid
-            // orphan; ArmManual will overwrite it.
-            if (result != AutoReconcileResult::Fallback) {
-                m_state = StreamingPoolState::Unconfigured;
-                m_lockedBytes = 0;
-                m_effectiveGb = m_policy.limits.FallbackGb();
-                m_enginePoolMb = 0;
-            }
-        }
+    if (m_state == StreamingPoolState::Unconfigured) {
+        PublishPolicyLocked();
+        m_lockedBytes = 0;
+        m_effectiveGb = m_policy.limits.FallbackGb();
+        m_enginePoolMb = 0;
+        m_payload.StoreForced(0);
         return;
     }
 
-    PublishPolicyLocked();
-    if (m_lockedBytes != 0) {
-        m_payload.StoreLock(m_lockedBytes);
+    if (m_state == StreamingPoolState::WaitingForEngine) {
+        PublishSafeHoldLocked();
+        return;
     }
+
+    if (m_lockedBytes != 0) {
+        m_payload.StoreForced(m_lockedBytes);
+    }
+    PublishPolicyLocked();
 }
 
 bool StreamingPoolController::UpdatePolicy(PoolSizePolicy policy) {
@@ -278,21 +184,20 @@ bool StreamingPoolController::UpdatePolicy(PoolSizePolicy policy) {
     switch (m_state) {
     case StreamingPoolState::Unconfigured:
         m_effectiveGb = m_policy.limits.FallbackGb();
-        (void)ReconcileOpenAutoPolicyLocked();
+        PublishPolicyLocked();
         break;
     case StreamingPoolState::Manual:
-        m_effectiveGb = NormalizePoolSizeGb(m_requestedManualGb, m_policy.limits);
-        m_lockedBytes = PoolSizeGbToBytes(m_effectiveGb, m_policy.limits);
-        m_payload.StoreLock(m_lockedBytes);
+        PublishLockLocked(
+            PoolSizeGbToBytes(m_requestedManualGb, m_policy.limits),
+            StreamingPoolState::Manual);
         PublishPolicyLocked();
         break;
     case StreamingPoolState::WaitingForEngine:
-        m_effectiveGb = m_policy.limits.FallbackGb();
         m_lastRejectedCandidate.reset();
-        (void)ReconcileOpenAutoPolicyLocked();
+        PublishSafeHoldLocked();
         break;
     case StreamingPoolState::LockedFromCVar:
-    case StreamingPoolState::LockedFromDetour:
+    case StreamingPoolState::LockedFromPathSample:
         if (IsPoolSizeWithinLimits(m_lockedBytes, m_policy.limits)) {
             PublishPolicyLocked();
         } else {
@@ -313,24 +218,14 @@ void StreamingPoolController::ArmManual(float requestedPoolSizeGb) {
     m_requestedManualGb = std::isfinite(requestedPoolSizeGb)
         ? requestedPoolSizeGb
         : m_policy.limits.FallbackGb();
-    m_effectiveGb = NormalizePoolSizeGb(m_requestedManualGb, m_policy.limits);
-    PublishPolicyLocked();
-    PublishLockLocked(PoolSizeGbToBytes(m_effectiveGb, m_policy.limits),
+    PublishLockLocked(PoolSizeGbToBytes(m_requestedManualGb, m_policy.limits),
                       StreamingPoolState::Manual);
+    PublishPolicyLocked();
 }
 
 void StreamingPoolController::ArmAuto() {
     std::lock_guard lock(m_mutex);
-
-    if (m_payload.IsBound()) {
-        const uint64_t orphan = m_payload.LoadLock(0);
-        if (orphan != 0 && IsPoolSizeWithinLimits(orphan, m_policy.limits) &&
-            m_state == StreamingPoolState::Unconfigured) {
-            AdoptDetourLocked(orphan);
-            return;
-        }
-    }
-    EnterWaitingLocked();
+    EnterAutoWaitingLocked();
 }
 
 bool StreamingPoolController::UpdateManualSize(float requestedPoolSizeGb) {
@@ -341,8 +236,7 @@ bool StreamingPoolController::UpdateManualSize(float requestedPoolSizeGb) {
     if (m_state != StreamingPoolState::Manual) {
         return false;
     }
-    m_effectiveGb = NormalizePoolSizeGb(m_requestedManualGb, m_policy.limits);
-    PublishLockLocked(PoolSizeGbToBytes(m_effectiveGb, m_policy.limits),
+    PublishLockLocked(PoolSizeGbToBytes(m_requestedManualGb, m_policy.limits),
                       StreamingPoolState::Manual);
     return true;
 }
@@ -350,8 +244,8 @@ bool StreamingPoolController::UpdateManualSize(float requestedPoolSizeGb) {
 EnginePoolObservation StreamingPoolController::ObserveEnginePoolMb(int32_t poolSizeMb) {
     std::lock_guard lock(m_mutex);
     if (m_state != StreamingPoolState::WaitingForEngine) {
-        return m_state == StreamingPoolState::LockedFromDetour
-            ? EnginePoolObservation::LockedFromDetour
+        return m_state == StreamingPoolState::LockedFromPathSample
+            ? EnginePoolObservation::LockedFromPathSample
             : EnginePoolObservation::Inactive;
     }
 
@@ -373,9 +267,9 @@ EnginePoolObservation StreamingPoolController::ObserveEnginePoolMb(int32_t poolS
     if (!bytes) {
         return EnginePoolObservation::NotReady;
     }
-    return TryAcquireCVarLockLocked(*bytes, poolSizeMb)
-        ? EnginePoolObservation::LockedFromCVar
-        : EnginePoolObservation::LockedFromDetour;
+
+    PublishLockLocked(*bytes, StreamingPoolState::LockedFromCVar, poolSizeMb);
+    return EnginePoolObservation::LockedFromCVar;
 }
 
 void StreamingPoolController::OnAutoTimeout() {
@@ -383,38 +277,18 @@ void StreamingPoolController::OnAutoTimeout() {
     if (m_state != StreamingPoolState::WaitingForEngine) {
         return;
     }
-    if (TryAdoptLiveDetourLocked()) {
+    if (TryAdoptPathSampleLocked()) {
         return;
     }
-
-    const uint64_t fallback = FallbackBytesLocked();
-    if (!m_payload.IsBound()) {
-        PublishFallbackLocked();
-        return;
-    }
-
-    uint64_t observed = 0;
-    for (;;) {
-        if (m_payload.CompareExchangeLock(observed, fallback)) {
-            PublishFallbackLocked();
-            return;
-        }
-        if (observed != 0 && IsPoolSizeWithinLimits(observed, m_policy.limits)) {
-            AdoptDetourLocked(observed);
-            return;
-        }
-        uint64_t expected = observed;
-        if (observed != 0 && m_payload.CompareExchangeLock(expected, fallback)) {
-            PublishFallbackLocked();
-            return;
-        }
-        observed = expected;
-    }
+    PublishFallbackLocked();
 }
 
-bool StreamingPoolController::PullDetourIfWaiting() {
+bool StreamingPoolController::TryAdoptPathSample() {
     std::lock_guard lock(m_mutex);
-    return TryAdoptLiveDetourLocked();
+    if (m_state != StreamingPoolState::WaitingForEngine) {
+        return false;
+    }
+    return TryAdoptPathSampleLocked();
 }
 
 StreamingPoolSnapshot StreamingPoolController::Snapshot() const {

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-07-15
+
+### Fixed
+- **StreamingPoolFix Auto** now reliably prefers a valid `r.Streaming.PoolSize` whether enabled at startup or later, then a safe streaming-path sample or VRAM-capped fallback.
+- Adapter identity churn and implausibly small dedicated-memory reports no longer collapse the safe streaming-pool limit.
+
 ## [1.4.0] - 2026-07-15
 
 ### Added

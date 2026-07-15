@@ -1,7 +1,10 @@
 #include "core/cvar_system.hpp"
+#include "core/cvar_layout.hpp"
+#include "core/cvar_resolver.hpp"
 #include "cvar_system_test_access.hpp"
 #include "test_check.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -34,6 +37,71 @@ IntWatchRequest Request(
 } // namespace
 
 void TestCVarWatch() {
+    // A CVar first requested after startup already carries a SetBy priority in
+    // its flags. It must resolve just like a constructor-priority object.
+    {
+        alignas(uintptr_t) std::array<uint8_t, 80> object{};
+        alignas(uintptr_t) uintptr_t vtableStorage = 0;
+        alignas(uintptr_t) uintptr_t globalPointer =
+            reinterpret_cast<uintptr_t>(object.data());
+        *reinterpret_cast<uintptr_t*>(object.data()) =
+            reinterpret_cast<uintptr_t>(&vtableStorage);
+        *reinterpret_cast<uint32_t*>(
+            object.data() + jst::core::cvar_layout::kFlagsOffset) = 0x03000040;
+        *reinterpret_cast<int32_t*>(
+            object.data() + jst::core::cvar_layout::kValueOffset) = 4000;
+
+        jst::core::ScanEntry scan;
+        scan.globalPtrCandidates.push_back(
+            reinterpret_cast<uintptr_t>(&globalPointer));
+        const auto resolved = jst::core::ResolveFromScan(
+            scan, jst::core::ModuleInfo{}, nullptr);
+        Check(resolved && resolved->writeAddr ==
+                  reinterpret_cast<uintptr_t>(object.data()) +
+                      jst::core::cvar_layout::kValueOffset,
+              "late CVar resolution accepts project-setting priority flags");
+
+        *reinterpret_cast<uint32_t*>(
+            object.data() + jst::core::cvar_layout::kFlagsOffset) = 0x0B000000;
+        Check(!jst::core::ResolveFromScan(scan, jst::core::ModuleInfo{}, nullptr),
+              "CVar resolution rejects an unknown priority above console");
+    }
+
+    // Direct primitive candidates must reject UTF-16 text fragments while
+    // retaining ordinary integer CVars.
+    {
+        alignas(IMAGE_NT_HEADERS) std::array<uint8_t, 0x500> image{};
+        const uintptr_t base = reinterpret_cast<uintptr_t>(image.data());
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+        dos->e_magic = IMAGE_DOS_SIGNATURE;
+        dos->e_lfanew = 0x80;
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        nt->Signature = IMAGE_NT_SIGNATURE;
+        nt->FileHeader.NumberOfSections = 1;
+        nt->FileHeader.SizeOfOptionalHeader = sizeof(nt->OptionalHeader);
+        auto* data = IMAGE_FIRST_SECTION(nt);
+        data->Name[0] = '.';
+        data->Name[1] = 'd';
+        data->Name[2] = 'a';
+        data->Name[3] = 't';
+        data->Name[4] = 'a';
+        data->VirtualAddress = 0x400;
+        data->Misc.VirtualSize = 0x100;
+
+        auto* storage = reinterpret_cast<uintptr_t*>(image.data() + 0x420);
+        *storage = 0x0072006F; // UTF-16 "or", previously accepted as a subnormal float.
+        jst::core::ScanEntry scan;
+        scan.refVarCandidates.push_back(reinterpret_cast<uintptr_t>(storage));
+        const jst::core::ModuleInfo module{base, image.size()};
+        Check(!jst::core::ResolveFromScan(scan, module, nullptr),
+              "UTF-16 text is not accepted as direct CVar storage");
+
+        *storage = 4000;
+        const auto resolved = jst::core::ResolveFromScan(scan, module, nullptr);
+        Check(resolved && resolved->writeAddr == reinterpret_cast<uintptr_t>(storage),
+              "ordinary integer direct CVar storage remains valid");
+    }
+
     // Continue observes repeatedly; Complete removes the registry entry.
     {
         CVarSystemTestAccess::Reset(Cvs());

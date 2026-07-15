@@ -32,6 +32,12 @@ void TestGraphicsAdapterService() {
     Check(!GraphicsAdapterServiceTestAccess::Classify(gameId, 24ull << 30, true)
                .HasDedicatedVideoMemory(),
           "software adapter publishes no dedicated VRAM");
+    Check(!GraphicsAdapterServiceTestAccess::Classify(gameId, 511ull << 20, false)
+               .HasDedicatedVideoMemory(),
+          "sub-512 MiB dedicated heaps are treated as no fixed VRAM");
+    Check(GraphicsAdapterServiceTestAccess::Classify(gameId, 512ull << 20, false)
+              .HasDedicatedVideoMemory(),
+          "512 MiB dedicated heap is the accepted boundary");
 
     Check(!service.Subscribe({}), "empty callback does not create a subscription");
 
@@ -61,17 +67,123 @@ void TestGraphicsAdapterService() {
           "same-adapter transient failure preserves confirmed VRAM");
     Check(callbacks == 2, "non-regression path does not re-notify subscribers");
 
-    // A changed identity is meaningful even if capacity is not yet known.
+    // A changed identity is published, but confirmed capacity is sticky so a
+    // LUID thrash cannot collapse pool policy to the legacy/tiny ceiling.
     constexpr GraphicsAdapterId otherId{.lowPart = 1, .highPart = 2};
     GraphicsAdapterServiceTestAccess::ApplyCandidate(
         service, GraphicsAdapterSnapshot{.id = otherId});
-    Check(service.Snapshot() == GraphicsAdapterSnapshot{.id = otherId},
-          "new adapter identity replaces the previous snapshot");
+    Check(service.Snapshot() == GraphicsAdapterSnapshot{
+              .id = otherId,
+              .dedicatedVideoMemoryBytes = 24ull << 30,
+          },
+          "new adapter identity keeps previously confirmed VRAM");
     Check(callbacks == 3, "adapter identity change notifies subscribers once");
+
+    // A weaker dedicated figure from another adapter must not shrink capacity.
+    // (Current identity is already otherId after the thrash publication above.)
+    constexpr GraphicsAdapterId thrashId{.lowPart = 9, .highPart = 9};
+    GraphicsAdapterServiceTestAccess::ApplyCandidate(
+        service,
+        GraphicsAdapterSnapshot{
+            .id = thrashId,
+            .dedicatedVideoMemoryBytes = 4ull << 30,
+        });
+    Check(service.Snapshot() == GraphicsAdapterSnapshot{
+              .id = thrashId,
+              .dedicatedVideoMemoryBytes = 24ull << 30,
+          },
+          "cross-LUID weaker probe preserves the higher dedicated figure");
+    Check(callbacks == 4, "cross-LUID weaker publication notifies with sticky VRAM");
+
+    // Repeating the weaker new LUID still cannot claim provenance and shrink it.
+    GraphicsAdapterServiceTestAccess::ApplyCandidate(
+        service,
+        GraphicsAdapterSnapshot{
+            .id = thrashId,
+            .dedicatedVideoMemoryBytes = 8ull << 30,
+        });
+    Check(service.Snapshot() == GraphicsAdapterSnapshot{
+              .id = thrashId,
+              .dedicatedVideoMemoryBytes = 24ull << 30,
+          },
+          "current identity alone does not grant capacity provenance");
+    Check(callbacks == 4, "deduplicated weak re-probe does not notify subscribers");
+
+    // The adapter that supplied the retained capacity may correct it downward.
+    GraphicsAdapterServiceTestAccess::ApplyCandidate(
+        service,
+        GraphicsAdapterSnapshot{
+            .id = gameId,
+            .dedicatedVideoMemoryBytes = 8ull << 30,
+        });
+    Check(service.Snapshot() == GraphicsAdapterSnapshot{
+              .id = gameId,
+              .dedicatedVideoMemoryBytes = 8ull << 30,
+          },
+          "capacity source may correct its own retained figure");
+    Check(callbacks == 5, "same-provenance correction notifies subscribers");
+
+    // Empty dedicated on the source LUID still preserves confirmed capacity.
+    GraphicsAdapterServiceTestAccess::ApplyCandidate(
+        service, GraphicsAdapterSnapshot{.id = gameId});
+    Check(service.Snapshot() == GraphicsAdapterSnapshot{
+              .id = gameId,
+              .dedicatedVideoMemoryBytes = 8ull << 30,
+          },
+          "same-source empty probe preserves confirmed VRAM");
+    Check(callbacks == 5, "same-source empty probe does not re-notify");
 
     subscription.Reset();
     GraphicsAdapterServiceTestAccess::Publish(service, {});
-    Check(callbacks == 3, "unsubscribed callback receives no later publications");
+    Check(callbacks == 5, "unsubscribed callback receives no later publications");
+
+    // Equal or stronger cross-LUID capacity transfers provenance to the winner.
+    {
+        constexpr GraphicsAdapterId equalId{.lowPart = 10, .highPart = 1};
+        constexpr GraphicsAdapterId strongerId{.lowPart = 11, .highPart = 1};
+        GraphicsAdapterServiceTestAccess::ApplyCandidate(
+            service,
+            GraphicsAdapterSnapshot{
+                .id = gameId,
+                .dedicatedVideoMemoryBytes = 8ull << 30,
+            });
+        GraphicsAdapterServiceTestAccess::ApplyCandidate(
+            service,
+            GraphicsAdapterSnapshot{
+                .id = equalId,
+                .dedicatedVideoMemoryBytes = 8ull << 30,
+            });
+        GraphicsAdapterServiceTestAccess::ApplyCandidate(
+            service,
+            GraphicsAdapterSnapshot{
+                .id = equalId,
+                .dedicatedVideoMemoryBytes = 6ull << 30,
+            });
+        Check(service.Snapshot() == GraphicsAdapterSnapshot{
+                  .id = equalId,
+                  .dedicatedVideoMemoryBytes = 6ull << 30,
+              },
+              "equal cross-LUID capacity transfers correction provenance");
+
+        GraphicsAdapterServiceTestAccess::ApplyCandidate(
+            service,
+            GraphicsAdapterSnapshot{
+                .id = strongerId,
+                .dedicatedVideoMemoryBytes = 16ull << 30,
+            });
+        GraphicsAdapterServiceTestAccess::ApplyCandidate(
+            service,
+            GraphicsAdapterSnapshot{
+                .id = strongerId,
+                .dedicatedVideoMemoryBytes = 12ull << 30,
+            });
+        Check(service.Snapshot() == GraphicsAdapterSnapshot{
+                  .id = strongerId,
+                  .dedicatedVideoMemoryBytes = 12ull << 30,
+              },
+              "stronger cross-LUID capacity becomes the correction source");
+        GraphicsAdapterServiceTestAccess::Publish(service, {});
+    }
 
     // Initial delivery and a racing publication are serialized in snapshot order.
     {
@@ -123,6 +235,8 @@ void TestGraphicsAdapterService() {
     }
 
     // A callback can unsubscribe a later subscriber before it is invoked.
+    // Use force publication so sticky capacity from earlier cases cannot rewrite
+    // the intentional 4 GiB payload this sequence keys off.
     {
         int firstCalls = 0;
         int cancelledCalls = 0;
@@ -138,7 +252,7 @@ void TestGraphicsAdapterService() {
                 ++cancelledCalls;
             }
         });
-        GraphicsAdapterServiceTestAccess::ApplyCandidate(service, GraphicsAdapterSnapshot{
+        GraphicsAdapterServiceTestAccess::Publish(service, GraphicsAdapterSnapshot{
             .id = gameId,
             .dedicatedVideoMemoryBytes = 4ull << 30,
         });
@@ -251,6 +365,79 @@ void TestGraphicsAdapterService() {
             Check(probeCalls == 2, "successful retry completes without duplicate probes");
         }
         asyncSubscription.Reset();
+    }
+
+    // A completed weaker cross-LUID probe must not undo capacity retained by
+    // the synchronous identity publication that preceded it.
+    {
+        GraphicsAdapterServiceTestAccess::Reset(service);
+        constexpr GraphicsAdapterId sourceId{.lowPart = 31, .highPart = 1};
+        constexpr GraphicsAdapterId weakerId{.lowPart = 32, .highPart = 1};
+        std::atomic<int> sourceCalls{0};
+        std::atomic<int> weakerCalls{0};
+        GraphicsAdapterServiceTestAccess::SetProbe(
+            service,
+            [&](GraphicsAdapterId id) -> std::optional<GraphicsAdapterSnapshot> {
+                if (id == sourceId) {
+                    sourceCalls.fetch_add(1, std::memory_order_relaxed);
+                    return GraphicsAdapterSnapshot{
+                        .id = id,
+                        .dedicatedVideoMemoryBytes = 24ull << 30,
+                    };
+                }
+                weakerCalls.fetch_add(1, std::memory_order_relaxed);
+                return GraphicsAdapterSnapshot{
+                    .id = id,
+                    .dedicatedVideoMemoryBytes = 8ull << 30,
+                };
+            });
+
+        service.ReportAdapterId(sourceId);
+        for (int attempt = 0;
+             attempt < 200 &&
+             !GraphicsAdapterServiceTestAccess::HasCompletedProbe(service, sourceId);
+             ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+        Check(service.Snapshot() == GraphicsAdapterSnapshot{
+                  .id = sourceId,
+                  .dedicatedVideoMemoryBytes = 24ull << 30,
+              },
+              "source adapter publishes its confirmed capacity");
+
+        service.ReportAdapterId(weakerId);
+        Check(service.Snapshot() == GraphicsAdapterSnapshot{
+                  .id = weakerId,
+                  .dedicatedVideoMemoryBytes = 24ull << 30,
+              },
+              "identity change synchronously retains source capacity");
+        for (int attempt = 0;
+             attempt < 200 &&
+             !GraphicsAdapterServiceTestAccess::HasCompletedProbe(service, weakerId);
+             ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+        Check(service.Snapshot() == GraphicsAdapterSnapshot{
+                  .id = weakerId,
+                  .dedicatedVideoMemoryBytes = 24ull << 30,
+              } &&
+                  GraphicsAdapterServiceTestAccess::HasCompletedProbe(
+                      service, weakerId) &&
+                  sourceCalls.load(std::memory_order_relaxed) == 1 &&
+                  weakerCalls.load(std::memory_order_relaxed) == 1,
+              "completed weaker cross-LUID probe preserves source capacity");
+
+        GraphicsAdapterServiceTestAccess::ApplyCandidate(
+            service,
+            GraphicsAdapterSnapshot{
+                .id = sourceId,
+                .dedicatedVideoMemoryBytes = 12ull << 30,
+            });
+        Check(service.Snapshot() == GraphicsAdapterSnapshot{
+                  .id = sourceId,
+                  .dedicatedVideoMemoryBytes = 12ull << 30,
+              },
+              "originating adapter may later correct retained capacity downward");
     }
 
     // A LUID change supersedes an older in-flight result. The single worker

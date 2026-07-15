@@ -96,7 +96,7 @@ void CVarSystem::UpdateFlags(const ResolvedCVar& resolved, std::wstring_view nam
     const uintptr_t flagsAddress = resolved.cvarObject + cvar_layout::kFlagsOffset;
     const uint32_t currentFlags = utils::SafeReadInt32(flagsAddress);
     const uint32_t newFlags =
-        (currentFlags & cvar_layout::kMaxValidFlags) | cvar_layout::kSetByConsole;
+        (currentFlags & cvar_layout::kFlagBitsMask) | cvar_layout::kSetByConsole;
     if (utils::SafeWrite<uint32_t>(flagsAddress, newFlags)) {
         JST_LOG_DEBUG("Updated priority flags for '{}' at 0x{:X}: 0x{:08X} -> 0x{:08X}.",
                       utils::WideToUtf8(name), flagsAddress, currentFlags, newFlags);

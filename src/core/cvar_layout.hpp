@@ -37,14 +37,11 @@ constexpr int32_t kShadowOffset = 76;   // 0x4C
 // Offset of the 32-bit console-variable flags field.
 constexpr int32_t kFlagsOffset = 0x18;
 
-// Priority bitmask applied to the flags field to mark "set by console command".
-// Matches ECVF_SetByConsole (priority nibble 0x0A) stored in the upper byte.
+// The upper byte records the source priority (constructor through console).
+// Lower bits contain the persistent EConsoleVariableFlags values.
+constexpr uint32_t kFlagBitsMask = 0x00FFFFFF;
+constexpr uint32_t kSetByMask = 0xFF000000;
 constexpr uint32_t kSetByConsole = 0x0a000000;
-
-// Maximum plausible value for a valid flags field.
-// A value above this indicates the address does not point to a valid
-// FConsoleVariable (the upper byte is reserved and must be zero).
-constexpr uint32_t kMaxValidFlags = 0x00FFFFFF;
 
 // Offset of the external pointer in FConsoleVariableRef objects.
 // Used to locate the backing variable for FAutoConsoleVariableRef.
@@ -94,7 +91,8 @@ struct ScanEntry {
     const uintptr_t vtable = utils::SafeReadPointer(cvarObject);
     if (!utils::IsValidPointer(vtable)) return false;
     const uint32_t flags = utils::SafeReadInt32(cvarObject + cvar_layout::kFlagsOffset);
-    return flags <= cvar_layout::kMaxValidFlags;
+    const uint32_t priority = flags & cvar_layout::kSetByMask;
+    return priority <= cvar_layout::kSetByConsole;
 }
 
 } // namespace jst::core

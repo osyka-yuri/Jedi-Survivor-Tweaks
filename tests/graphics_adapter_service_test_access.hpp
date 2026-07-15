@@ -55,6 +55,12 @@ public:
         service.ApplyCandidate(std::move(snapshot));
     }
 
+    [[nodiscard]] static bool HasCompletedProbe(
+        GraphicsAdapterService& service, GraphicsAdapterId id) {
+        std::lock_guard lock(service.m_mutex);
+        return service.m_completedProbeId == id;
+    }
+
     [[nodiscard]] static GraphicsAdapterSnapshot Classify(
         GraphicsAdapterId id, uint64_t dedicatedBytes, bool software) noexcept {
         return GraphicsAdapterService::ClassifyAdapter(id, dedicatedBytes, software);

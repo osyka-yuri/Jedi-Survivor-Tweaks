@@ -14,6 +14,8 @@ namespace jst::core {
 
 namespace {
 
+constexpr uint64_t kMinimumDedicatedVideoMemoryBytes = 512ull << 20; // 512 MiB
+
 [[nodiscard]] LUID ToLuid(GraphicsAdapterId id) noexcept {
     return LUID{
         .LowPart = id.lowPart,
@@ -38,7 +40,7 @@ GraphicsAdapterService::~GraphicsAdapterService() {
 GraphicsAdapterSnapshot GraphicsAdapterService::ClassifyAdapter(
     GraphicsAdapterId id, uint64_t dedicatedBytes, bool software) noexcept {
     GraphicsAdapterSnapshot snapshot{.id = id};
-    if (!software && dedicatedBytes != 0) {
+    if (!software && dedicatedBytes >= kMinimumDedicatedVideoMemoryBytes) {
         snapshot.dedicatedVideoMemoryBytes = dedicatedBytes;
     }
     return snapshot;
@@ -165,11 +167,13 @@ void GraphicsAdapterService::ReportAdapterId(GraphicsAdapterId id) noexcept {
                     .notBefore = std::chrono::steady_clock::now(),
                 };
 
-                publication = GraphicsAdapterSnapshot{.id = id};
+                publication = MergeCapacityLocked(GraphicsAdapterSnapshot{.id = id});
                 m_snapshot = publication;
                 sequence = ++m_sequence;
                 subscribers = m_subscribers;
-            } else if (!completed && !hasCapacity && !alreadyQueued) {
+            } else if (completed) {
+                return;
+            } else if (!alreadyQueued && !hasCapacity) {
                 ++m_probeGeneration;
                 m_pendingProbe = ProbeWork{
                     .id = id,
@@ -177,7 +181,7 @@ void GraphicsAdapterService::ReportAdapterId(GraphicsAdapterId id) noexcept {
                     .attempt = 0,
                     .notBefore = std::chrono::steady_clock::now(),
                 };
-            } else if (completed || hasCapacity) {
+            } else if (!alreadyQueued) {
                 return;
             }
 
@@ -257,6 +261,7 @@ void GraphicsAdapterService::ProbeLoop() {
         }
 
         result.snapshot.id = work.id;
+        result.snapshot = MergeCapacityLocked(std::move(result.snapshot));
         m_completedProbeId = work.id;
         if (m_snapshot == result.snapshot) {
             continue;
@@ -274,16 +279,50 @@ void GraphicsAdapterService::ProbeLoop() {
     }
 }
 
+GraphicsAdapterSnapshot GraphicsAdapterService::MergeCapacityLocked(
+    GraphicsAdapterSnapshot candidate) noexcept {
+    if (!m_snapshot.HasDedicatedVideoMemory()) {
+        m_capacitySourceId = candidate.HasDedicatedVideoMemory()
+            ? candidate.id
+            : std::nullopt;
+        return candidate;
+    }
+
+    if (!candidate.HasDedicatedVideoMemory()) {
+        candidate.dedicatedVideoMemoryBytes = m_snapshot.dedicatedVideoMemoryBytes;
+        return candidate;
+    }
+
+    const bool sameSource = candidate.id && candidate.id == m_capacitySourceId;
+    if (sameSource ||
+        *candidate.dedicatedVideoMemoryBytes >= *m_snapshot.dedicatedVideoMemoryBytes) {
+        m_capacitySourceId = candidate.id;
+        return candidate;
+    }
+
+    candidate.dedicatedVideoMemoryBytes = m_snapshot.dedicatedVideoMemoryBytes;
+    return candidate;
+}
+
+void GraphicsAdapterService::SetCapacitySourceLocked(
+    const GraphicsAdapterSnapshot& snapshot) noexcept {
+    m_capacitySourceId = snapshot.HasDedicatedVideoMemory()
+        ? snapshot.id
+        : std::nullopt;
+}
+
 void GraphicsAdapterService::ApplyCandidate(
     GraphicsAdapterSnapshot candidate,
     bool force) {
     std::vector<std::shared_ptr<Subscriber>> subscribers;
     uint64_t sequence = 0;
+    GraphicsAdapterSnapshot publication{};
     {
         std::lock_guard lock(m_mutex);
-        if (!force && !candidate.HasDedicatedVideoMemory() &&
-            m_snapshot.HasDedicatedVideoMemory() && m_snapshot.id == candidate.id) {
-            return;
+        if (force) {
+            SetCapacitySourceLocked(candidate);
+        } else {
+            candidate = MergeCapacityLocked(std::move(candidate));
         }
         if (!force && m_snapshot == candidate) {
             return;
@@ -297,13 +336,14 @@ void GraphicsAdapterService::ApplyCandidate(
             return;
         }
         m_snapshot = candidate;
+        publication = candidate;
         sequence = ++m_sequence;
         subscribers = m_subscribers;
     }
     m_probeCv.notify_all();
 
     for (const auto& subscriber : subscribers) {
-        Invoke(subscriber, candidate, sequence);
+        Invoke(subscriber, publication, sequence);
     }
 }
 

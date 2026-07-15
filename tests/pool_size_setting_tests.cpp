@@ -120,6 +120,17 @@ void TestPoolSizeSetting() {
               "status reports detected VRAM");
         Check(status.find("requested 20.0 GB") != std::string::npos,
               "status reports normalized/manual difference");
+
+        const auto waiting = FormatStreamingPoolStatus(StreamingPoolSnapshot{
+            .state = StreamingPoolState::WaitingForEngine,
+            .lockedBytes = PoolSizeGbToBytes(5.0f, policy.limits),
+            .effectiveGb = 5.0f,
+            .policy = policy,
+        });
+        Check(waiting.find("Waiting for engine pool size...") != std::string::npos,
+              "waiting status is reported");
+        Check(waiting.find("holding 5.0 GB") != std::string::npos,
+              "waiting status reports temporary hold size");
     }
 
     Check(NearlyEqual(NormalizePoolSizeGb(

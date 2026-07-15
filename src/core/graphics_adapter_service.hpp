@@ -35,8 +35,9 @@ struct GraphicsAdapterSnapshot {
 };
 
 // Process-wide, loader-neutral identity and physical dedicated-memory service
-// for the adapter actually selected by the game. Identity publication is
-// synchronous and cheap; DXGI probing and retry run on one coalescing worker.
+// for the adapter selected by the game. Identity publication is synchronous;
+// DXGI probing and retry run on one coalescing worker. Confirmed capacity stays
+// sticky across identity churn unless its originating adapter corrects it.
 class GraphicsAdapterService final {
 private:
     struct Subscriber;
@@ -120,6 +121,9 @@ private:
 
     void StartWorkerLocked();
     void ProbeLoop();
+    [[nodiscard]] GraphicsAdapterSnapshot MergeCapacityLocked(
+        GraphicsAdapterSnapshot candidate) noexcept;
+    void SetCapacitySourceLocked(const GraphicsAdapterSnapshot& snapshot) noexcept;
     void ApplyCandidate(GraphicsAdapterSnapshot candidate, bool force = false);
     static void Invoke(
         const std::shared_ptr<Subscriber>& subscriber,
@@ -131,6 +135,7 @@ private:
     std::mutex m_workerLifecycleMutex;
     std::condition_variable m_probeCv;
     GraphicsAdapterSnapshot m_snapshot;
+    std::optional<GraphicsAdapterId> m_capacitySourceId;
     std::optional<GraphicsAdapterId> m_completedProbeId;
     std::optional<ProbeWork> m_pendingProbe;
     std::optional<ProbeWork> m_inFlightProbe;

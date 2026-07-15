@@ -68,7 +68,7 @@ void StreamingPoolFix::LogAutoLock(const StreamingPoolSnapshot& snapshot) const 
             "StreamingPoolFix | auto locked at {:.2f} GB (engine-reported {} MB)",
             snapshot.effectiveGb,
             snapshot.enginePoolMb);
-    } else if (snapshot.state == StreamingPoolState::LockedFromDetour) {
+    } else if (snapshot.state == StreamingPoolState::LockedFromPathSample) {
         JST_LOG_INFO(
             "StreamingPoolFix | auto locked at {:.2f} GB (streaming path)",
             snapshot.effectiveGb);
@@ -82,20 +82,11 @@ void StreamingPoolFix::ApplySetting() {
     if (m_setting.IsAuto()) {
         m_controller.ArmAuto();
         const auto snapshot = m_controller.Snapshot();
-        if (snapshot.state == StreamingPoolState::WaitingForEngine) {
-            StartEngineWatch();
-            JST_LOG_INFO(
-                "StreamingPoolFix | auto: waiting for engine pool size "
-                "(fallback {:.1f} GB)",
-                snapshot.policy.limits.FallbackGb());
-        } else if (snapshot.state == StreamingPoolState::Fallback) {
-            JST_LOG_WARNING(
-                "StreamingPoolFix | auto: unsafe pre-existing pool lock replaced "
-                "with {:.1f} GB fallback",
-                snapshot.effectiveGb);
-        } else {
-            LogAutoLock(snapshot);
-        }
+        StartEngineWatch();
+        JST_LOG_INFO(
+            "StreamingPoolFix | auto: waiting for r.Streaming.PoolSize "
+            "(then path sample or {:.1f} GB fallback)",
+            snapshot.policy.limits.FallbackGb());
         return;
     }
 
@@ -117,10 +108,13 @@ void StreamingPoolFix::StartEngineWatch() {
     request.name = std::wstring(kPoolSizeCVar);
     request.timeout = kAutoWatchTimeout;
     request.onValue = [this](int32_t value) {
+        // Priority: in-range CVar first, then first streaming-path sample.
+        // shouldAbort must not adopt the path sample before this runs (registry
+        // order is shouldAbort → timeout → onValue).
         const auto observation = m_controller.ObserveEnginePoolMb(value);
         switch (observation) {
         case EnginePoolObservation::NotReady:
-            return jst::core::CVarWatchDecision::Continue;
+            break;
         case EnginePoolObservation::RejectedBelowMinimum:
         case EnginePoolObservation::RejectedAboveMaximum: {
             int32_t expected = m_lastLoggedRejectedEngineMb.load(std::memory_order_relaxed);
@@ -134,22 +128,24 @@ void StreamingPoolFix::StartEngineWatch() {
                     snapshot.policy.limits.MinimumGb(),
                     snapshot.policy.limits.MaximumGb());
             }
-            return jst::core::CVarWatchDecision::Continue;
+            break;
         }
         case EnginePoolObservation::LockedFromCVar:
-        case EnginePoolObservation::LockedFromDetour:
+        case EnginePoolObservation::LockedFromPathSample:
             LogAutoLock(m_controller.Snapshot());
             return jst::core::CVarWatchDecision::Complete;
         case EnginePoolObservation::Inactive:
+            return jst::core::CVarWatchDecision::Complete;
+        }
+
+        if (m_controller.TryAdoptPathSample()) {
+            LogAutoLock(m_controller.Snapshot());
             return jst::core::CVarWatchDecision::Complete;
         }
         return jst::core::CVarWatchDecision::Continue;
     };
     request.onTimeout = [this] { OnEngineWatchTimeout(); };
     request.shouldAbort = [this] {
-        if (m_controller.PullDetourIfWaiting()) {
-            LogAutoLock(m_controller.Snapshot());
-        }
         return !m_controller.IsWaitingForEngine();
     };
 
@@ -258,8 +254,9 @@ RuntimeControl StreamingPoolFix::MakeAutoCheckbox(std::string_view section) {
             },
         },
         .tooltip =
-            "Writes PoolSizeGB=auto when enabled. Freezes the streaming pool at "
-            "the first safe engine value; manual mode uses the slider below.",
+            "Writes PoolSizeGB=auto when enabled. Prefers r.Streaming.PoolSize "
+            "when in range, else the first streaming-path sample, else fallback. "
+            "Manual mode uses the slider below.",
     };
 }
 

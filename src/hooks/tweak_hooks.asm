@@ -5,10 +5,10 @@
 ;   [r11 + 0]  uintptr_t  resumeAddress   (8 bytes)
 ;   [r11 + 8]  float      multiplier      (4 bytes)
 ;   [r11 + 12] float      one             (4 bytes, constant 1.0f)
-;   [r11 + 16] uint64_t   lockedBytes          (8 bytes, forced lock)
-;   [r11 + 24] uint64_t   captureCeilingBytes  (8 bytes, capture ceiling)
-;   [r11 + 32] uint64_t   fallbackBytes        (8 bytes, auto fallback)
-;   [r11 + 40] <padding>                  (8 bytes, alignas(16) pads 40 -> 48)
+;   [r11 + 16] uint64_t   forcedBytes               (8 bytes, C++-owned lock)
+;   [r11 + 24] uint64_t   captureCeilingBytes       (8 bytes, capture ceiling)
+;   [r11 + 32] uint64_t   fallbackBytes             (8 bytes, auto fallback)
+;   [r11 + 40] uint64_t   firstObservedEngineBytes  (8 bytes, first in-range sample)
 ;   sizeof = 48, alignment = 16
 ;
 ; SLOT_* constants are generated from src/hooks/slots.def.
@@ -16,6 +16,11 @@
 EXTERN g_contexts : QWORD
 
 CONTEXT_SIZE EQU 48
+STREAMING_FORCED_OFFSET EQU 16
+STREAMING_CEILING_OFFSET EQU 24
+STREAMING_FALLBACK_OFFSET EQU 32
+STREAMING_FIRST_OBSERVED_OFFSET EQU 40
+STREAMING_MIN_BYTES EQU 20000000h
 INCLUDE tweak_hooks_slots.inc
 
 .CODE
@@ -119,7 +124,7 @@ CameraDistance_Detour PROC PUBLIC
 CameraDistance_Detour ENDP
 
 ; ---------------------------------------------------------------------------
-; StreamingPoolFix - locks the streaming pool size (bytes in lockedBytes).
+; StreamingPoolFix - locks the streaming pool size (bytes in forcedBytes).
 ;
 ; The 16-byte patch window (kAbsoluteJmpSize=14, 4 instructions decoded by Zydis)
 ; starting at the pattern's kOffset covers, verbatim:
@@ -131,10 +136,10 @@ CameraDistance_Detour ENDP
 ;
 ; Detour protocol — keep in sync with streaming_pool_controller.hpp /
 ; streaming_pool_protocol.hpp:
-;   lockedBytes != 0  → forced lock: rdx = lockedBytes
-;   lockedBytes == 0  → passthrough: rdx = original [rsp+40h]
-;                       lock-once CAS when size is capturable
-;                    so Auto works even when r.Streaming.PoolSize stays -1.
+;   firstObservedEngineBytes stores the first original size in [min, ceiling],
+;   including while a forced lock is active. C++ never clears it.
+;   forcedBytes != 0  → forced lock: rdx = forcedBytes
+;   forcedBytes == 0  → passthrough: rdx = original [rsp+40h]
 ;   captureCeilingBytes → dynamic inclusive capture ceiling in bytes
 ;   fallbackBytes       → effective auto fallback in bytes
 ;
@@ -144,44 +149,42 @@ CameraDistance_Detour ENDP
 ;   above max               — use fallbackBytes for this invocation, do not lock
 ;
 ; Stack: prologue push r11 shifts original [rsp+40h] → [rsp+48h].
-; Capture path pushes rax (preserve al from CALL) → engine size at [rsp+50h].
+; We always push rax (preserve al from CALL) → engine size at [rsp+50h].
 ; ---------------------------------------------------------------------------
 StreamingPoolFix_Detour PROC PUBLIC
     JST_DETOUR_PROLOGUE SLOT_STREAMINGPOOLFIX
 
-    mov  rdx, qword ptr [r11 + 16]      ; lockedBytes: forced lock?
-    test rdx, rdx
-    jnz  have_payload
-
-    ; ---- Auto unlocked: passthrough + optional lock-once capture ----
     push rax                            ; preserve al (CALL result for test al,al)
     mov  rdx, qword ptr [rsp + 50h]     ; original pool size [rsp+40h]
 
-    ; rdx >= 0.5 GiB?
-    mov  rax, 20000000h
-    cmp  rdx, rax
-    jb   skip_capture
-
-    ; rdx > active ceiling? Preserve auto as unlocked, but never forward an
-    ; absurd candidate to the game. The controller will lock fallbackBytes on its
-    ; timeout if no valid CVar/detour source arrives.
-    mov  rax, qword ptr [r11 + 24]
-    cmp  rdx, rax
-    jbe  do_capture
-    mov  rdx, qword ptr [r11 + 32]      ; fallbackBytes: temporary safe value
-    jmp  skip_capture
-
-do_capture:
-    ; lock cmpxchg [lockedBytes], rdx with expected=0
+    ; Capture the first in-range original engine size.
+    mov  rax, qword ptr [r11 + STREAMING_FIRST_OBSERVED_OFFSET]
+    test rax, rax
+    jnz  sample_complete
+    cmp  rdx, STREAMING_MIN_BYTES
+    jb   sample_complete
+    cmp  rdx, qword ptr [r11 + STREAMING_CEILING_OFFSET]
+    ja   sample_complete
     xor  eax, eax
-    lock cmpxchg qword ptr [r11 + 16], rdx
-    jz   skip_capture                   ; we won: rdx already has the lock value
-    mov  rdx, rax                       ; lost race: use winner's lockedBytes
+    lock cmpxchg qword ptr [r11 + STREAMING_FIRST_OBSERVED_OFFSET], rdx
 
-skip_capture:
+sample_complete:
+    mov  rax, qword ptr [r11 + STREAMING_FORCED_OFFSET]
+    test rax, rax
+    jz   unforced_path
+    mov  rdx, rax
+    jmp  payload_ready
+
+unforced_path:
+    cmp  rdx, STREAMING_MIN_BYTES
+    jb   payload_ready
+    cmp  rdx, qword ptr [r11 + STREAMING_CEILING_OFFSET]
+    jbe  payload_ready
+    mov  rdx, qword ptr [r11 + STREAMING_FALLBACK_OFFSET]
+
+payload_ready:
     pop  rax
 
-have_payload:
     test al, al                         ; (2) replicate: flags from the preceding CALL
     jz   taken                          ; (3) replicate: jz +0x16 -> skip recalc path
     mov  rax, qword ptr [rbx + 0108h]   ; (4) replicate: recalc path (fall-through only)

@@ -23,8 +23,7 @@ struct alignas(16) JstContext {
     float          one;            // [r11 + 12] constant 1.0f -- used by the
                                    //            GameplayFOV detour to compute
                                    //            (multiplier - 1) via `subss`
-    // Named StreamingPoolFix protocol at [16..39]. Policy words are published
-    // before lockedBytes is cleared to open auto-capture.
+    // StreamingPoolFix protocol at [16..47].
     jst::core::StreamingPoolPayload streamingPool;
 };
 #pragma warning(pop)
@@ -40,9 +39,10 @@ static_assert(offsetof(JstContext, one) == 12,               "tweak_hooks.asm us
 static_assert(offsetof(JstContext, streamingPool) == 16,
               "tweak_hooks.asm expects StreamingPoolPayload at [r11 + 16]");
 static_assert(offsetof(JstContext, streamingPool) % alignof(uint64_t) == 0);
-static_assert(offsetof(jst::core::StreamingPoolPayload, lockedBytes) == 0);
+static_assert(offsetof(jst::core::StreamingPoolPayload, forcedBytes) == 0);
 static_assert(offsetof(jst::core::StreamingPoolPayload, captureCeilingBytes) == 8);
 static_assert(offsetof(jst::core::StreamingPoolPayload, fallbackBytes) == 16);
+static_assert(offsetof(jst::core::StreamingPoolPayload, firstObservedEngineBytes) == 24);
 
 namespace jst::hooks {
 

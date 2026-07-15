@@ -12,16 +12,17 @@ inline constexpr uint64_t kStreamingPoolMinimumBytes = kBytesPerGiB / 2;
 inline constexpr uint64_t kStreamingPoolLegacyCeilingBytes = 12ull * kBytesPerGiB;
 inline constexpr uint64_t kStreamingPoolDefaultFallbackBytes = 2ull * kBytesPerGiB;
 
-// Shared C++/MASM protocol for StreamingPoolFix. Every C++ access to these
-// words goes through std::atomic_ref in StreamingPoolController; the x64
-// detour uses aligned 64-bit loads and a locked cmpxchg.
+// Shared C++/MASM protocol for StreamingPoolFix. C++ owns forcedBytes and the
+// policy words. The detour reads those words and publishes the first in-range
+// engine sample with a one-shot compare-exchange. Every C++ access is atomic.
 struct StreamingPoolPayload {
-    uint64_t lockedBytes = 0;
+    uint64_t forcedBytes = 0;
     uint64_t captureCeilingBytes = kStreamingPoolLegacyCeilingBytes;
     uint64_t fallbackBytes = kStreamingPoolDefaultFallbackBytes;
+    uint64_t firstObservedEngineBytes = 0;
 };
 
-static_assert(sizeof(StreamingPoolPayload) == 24);
+static_assert(sizeof(StreamingPoolPayload) == 32);
 static_assert(alignof(StreamingPoolPayload) == alignof(uint64_t));
 static_assert(std::is_standard_layout_v<StreamingPoolPayload>);
 static_assert(std::is_trivially_copyable_v<StreamingPoolPayload>);
