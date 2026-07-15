@@ -11,7 +11,12 @@
 // DrawOverlay callback registered below. This entry point stays slim.
 
 #include <windows.h>
+#include <d3d12.h>
 
+#include <atomic>
+#include <cstdint>
+
+#include "core/graphics_adapter_service.hpp"
 #include "main_app.hpp"
 #include "reshade/overlay.hpp"
 
@@ -37,6 +42,43 @@ extern "C" __declspec(dllexport) const char* const DESCRIPTION =
 
 namespace {
     HMODULE g_hModule = nullptr;
+    std::atomic<uint64_t> g_lastAdapterKey{0};
+    std::atomic<bool> g_hasAdapterKey{false};
+
+    [[nodiscard]] jst::core::GraphicsAdapterId ToAdapterId(LUID luid) noexcept {
+        return jst::core::GraphicsAdapterId{
+            .lowPart = luid.LowPart,
+            .highPart = luid.HighPart,
+        };
+    }
+
+    void ReportD3D12Adapter(reshade::api::device* device) {
+        if (!device || device->get_api() != reshade::api::device_api::d3d12) {
+            return;
+        }
+        auto* native = reinterpret_cast<ID3D12Device*>(device->get_native());
+        if (native) {
+            const auto id = ToAdapterId(native->GetAdapterLuid());
+            const uint64_t key =
+                (static_cast<uint64_t>(static_cast<uint32_t>(id.highPart)) << 32) |
+                id.lowPart;
+            if (g_hasAdapterKey.load(std::memory_order_acquire) &&
+                g_lastAdapterKey.load(std::memory_order_acquire) == key) {
+                return;
+            }
+            g_lastAdapterKey.store(key, std::memory_order_release);
+            g_hasAdapterKey.store(true, std::memory_order_release);
+            jst::core::GraphicsAdapterService::Instance().ReportAdapterId(id);
+        }
+    }
+
+    void ReportD3D12AdapterAfterPresent(
+        reshade::api::command_queue* queue,
+        reshade::api::swapchain* /*swapchain*/) {
+        if (queue) {
+            ReportD3D12Adapter(queue->get_device());
+        }
+    }
 } // anonymous namespace
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
@@ -45,10 +87,19 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
         g_hModule = hModule;
         DisableThreadLibraryCalls(hModule);
         if (!reshade::register_addon(hModule)) return FALSE;
+        reshade::register_event<reshade::addon_event::init_device>(&ReportD3D12Adapter);
+        // init_device is not replayed for an add-on loaded after device
+        // creation. The first subsequent present recovers the existing device;
+        // adapter-key deduplication makes later frames no-ops.
+        reshade::register_event<reshade::addon_event::finish_present>(
+            &ReportD3D12AdapterAfterPresent);
         reshade::register_overlay("JediSurvivorTweaks", &jst::DrawOverlay);
         jst::BootstrapAsync(hModule, jst::LoaderVariant::ReShadeAddon);
     } else if (reason == DLL_PROCESS_DETACH) {
         reshade::unregister_overlay("JediSurvivorTweaks", &jst::DrawOverlay);
+        reshade::unregister_event<reshade::addon_event::finish_present>(
+            &ReportD3D12AdapterAfterPresent);
+        reshade::unregister_event<reshade::addon_event::init_device>(&ReportD3D12Adapter);
         reshade::unregister_addon(hModule);
     }
     return TRUE;

@@ -147,8 +147,10 @@ std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
         .current = m_overlayEnabledPref,
         .defaultValue = m_enabledByDefault,
         .apply = [this](bool value) { m_overlayEnabledPref = value; },
-        .configSection = m_name,
-        .configKey = "Enabled",
+        .persistence = ControlPersistence{
+            .section = m_name,
+            .key = "Enabled",
+        },
         .tooltip =
             "Persists [<TweakName>] Enabled to the .ini. Takes effect on next "
             "game launch. Runtime controls below apply immediately.",
@@ -172,6 +174,31 @@ std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
     }
 
     return controls;
+}
+
+RuntimeControlResetResult HookTweak::ResetRuntimeControls(jst::core::Config& config) {
+    bool changed = false;
+
+    if (m_overlayEnabledPref != m_enabledByDefault) {
+        m_overlayEnabledPref = m_enabledByDefault;
+        config.SetBool(m_name, "Enabled", m_overlayEnabledPref);
+        changed = true;
+    }
+
+    if (m_runtimeFloatConfig && m_initialized) {
+        const auto& runtimeFloat = *m_runtimeFloatConfig;
+        const float defaultValue = DefaultSliderValue(runtimeFloat.slider);
+        if (!SliderValuesNearlyEqual(m_loadedMultiplier, defaultValue)) {
+            m_loadedMultiplier = defaultValue;
+            ApplyMultiplier(defaultValue);
+            config.SetFloat(m_name, runtimeFloat.configKey, defaultValue);
+            changed = true;
+        }
+    }
+
+    return changed
+        ? RuntimeControlResetResult::Changed
+        : RuntimeControlResetResult::Unchanged;
 }
 
 void HookTweak::Shutdown() {

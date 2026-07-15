@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-15
+
+### Added
+- **StreamingPoolFix Auto mode** — single key `PoolSizeGB`:
+  - **`auto`** (shipped default) freezes the pool at the first valid engine size (exact engine MiB and/or streaming-path bytes). Timeout (~30 s) falls back to **2.0 GiB**, capped by the active GPU policy.
+  - **Number** (e.g. `2.0`) locks manually. All locks use a dynamic maximum of **70% of the physical dedicated VRAM** of the GPU selected by the game (24 GiB → 16.8 GiB). The existing `PoolSizeGB` key/UI label remains compatible; internal conversions are exact MiB/GiB.
+  - Overlay: **Auto** checkbox persists `PoolSizeGB=auto` / a number; slider when manual. Returning to manual during the same session restores the prior manual size.
+  - GPU-aware policy follows the adapter selected by the game. ReShade reports it from the current D3D12 device; ASI adds an early normal/delay-import observer for `D3D12CreateDevice`, including later device recreation. A late-loaded ReShade add-on recovers the current device on the next present.
+  - DXGI probing is asynchronous and retries transient failures. Unknown, UMA, and software adapters retain the legacy **12.0 GiB** ceiling rather than guessing another GPU.
+
+### Changed
+- **StreamingPoolFix is enabled by default** (was opt-in). Set `Enabled = false` to turn it off.
+- **StreamingPoolFix internals** now use a single typed policy/controller state and a named C++/MASM payload. Engine CVar observation uses move-only RAII subscriptions, and runtime-control persistence/reset is loader-neutral.
+
+### Fixed
+- **Deferred CVar writes**: if either the primary or shadow memory write fails after resolution, the target remains pending and is retried without rescanning instead of being treated as resolved.
+- **Initial CVar scan**: a temporarily unavailable game module no longer causes queued scan work to be lost.
+
 ## [1.3.0] - 2026-07-09
 
 ### Fixed

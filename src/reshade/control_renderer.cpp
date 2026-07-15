@@ -125,38 +125,4 @@ bool RenderControl(jst::tweaks::RuntimeControl& ctrl, float labelWidth) {
     }, ctrl);
 }
 
-void PersistControl(const jst::tweaks::RuntimeControl& ctrl, jst::core::Config& rc) {
-    std::visit([&rc](auto& c) {
-        using T = std::decay_t<decltype(c)>;
-        if constexpr (std::is_same_v<T, jst::tweaks::SliderFloatControl>) {
-            if (!c.configSection.empty())
-                rc.SetFloat(c.configSection, c.configKey, c.current);
-        } else if constexpr (std::is_same_v<T, jst::tweaks::CheckboxControl>) {
-            if (!c.configSection.empty())
-                rc.SetBool(c.configSection, c.configKey, c.current);
-        }
-    }, ctrl);
-}
-
-bool ResetControlToDefault(jst::tweaks::RuntimeControl& ctrl, jst::core::Config& rc) {
-    return std::visit([&](auto& c) -> bool {
-        using T = std::decay_t<decltype(c)>;
-        if constexpr (std::is_same_v<T, jst::tweaks::SliderFloatControl>) {
-            if (!jst::tweaks::TryCommitSliderEdit(c, c.spec.defaultValue, c.current)) {
-                return false;
-            }
-            PersistControl(ctrl, rc);
-            return true;
-        } else if constexpr (std::is_same_v<T, jst::tweaks::CheckboxControl>) {
-            if (c.current == c.defaultValue) return false;
-            c.current = c.defaultValue;
-            c.apply(c.current);
-            PersistControl(ctrl, rc);
-            return true;
-        } else {
-            return false;
-        }
-    }, ctrl);
-}
-
 } // namespace jst::overlay

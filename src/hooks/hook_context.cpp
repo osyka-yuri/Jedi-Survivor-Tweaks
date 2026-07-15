@@ -2,7 +2,12 @@
 
 namespace {
 constexpr std::size_t kSlotCount = std::to_underlying(jst::hooks::Slot::Count);
-constexpr JstContext kDefaultContext{0, 1.0f, 1.0f, 0};
+constexpr JstContext kDefaultContext{
+    0,
+    1.0f,
+    1.0f,
+    {},
+};
 } // namespace
 
 extern "C" {

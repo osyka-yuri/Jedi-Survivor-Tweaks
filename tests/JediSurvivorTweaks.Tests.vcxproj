@@ -47,7 +47,7 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;ZYDIS_STATIC_BUILD;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;ZYDIS_STATIC_BUILD;JST_UNIT_TESTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <AdditionalIncludeDirectories>$(ProjectDir)..\src;$(ProjectDir)..\src\external\zydis;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -61,6 +61,12 @@
     <ClCompile Include="hook_engine_tests.cpp" />
     <ClCompile Include="slider_utils_tests.cpp" />
     <ClCompile Include="runtime_control_tests.cpp" />
+    <ClCompile Include="streaming_pool_controller_tests.cpp" />
+    <ClCompile Include="pool_size_setting_tests.cpp" />
+    <ClCompile Include="cvar_watch_tests.cpp" />
+    <ClCompile Include="graphics_adapter_service_tests.cpp" />
+    <ClCompile Include="import_address_hook_tests.cpp" />
+    <ClCompile Include="pe_imports_tests.cpp" />
     <ClCompile Include="..\src\core\config.cpp" />
     <ClCompile Include="..\src\core\hook_engine.cpp" />
     <ClCompile Include="..\src\core\hook_transaction.cpp" />
@@ -68,8 +74,19 @@
     <ClCompile Include="..\src\core\gateway_allocator.cpp" />
     <ClCompile Include="..\src\core\logging.cpp" />
     <ClCompile Include="..\src\core\memory_scanner.cpp" />
+    <ClCompile Include="..\src\core\pe_utils.cpp" />
+    <ClCompile Include="..\src\core\cvar_resolver.cpp" />
+    <ClCompile Include="..\src\core\cvar_scanner.cpp" />
+    <ClCompile Include="..\src\core\cvar_system.cpp" />
+    <ClCompile Include="..\src\core\cvar_watch_registry.cpp" />
+    <ClCompile Include="..\src\core\graphics_adapter_service.cpp" />
+    <ClCompile Include="..\src\core\import_address_hook.cpp" />
+    <ClCompile Include="..\src\core\pe_imports.cpp" />
     <ClCompile Include="..\src\hooks\hook_context.cpp" />
     <ClCompile Include="..\src\tweaks\hook_tweak.cpp" />
+    <ClCompile Include="..\src\tweaks\runtime_control.cpp" />
+    <ClCompile Include="..\src\tweaks\streaming_pool_policy.cpp" />
+    <ClCompile Include="..\src\tweaks\streaming_pool_controller.cpp" />
     <ClCompile Include="..\src\external\zydis\Zydis.c">
       <!-- Vendored Zydis 4.1.1 (monolithic MIT single-file build). Lower warning level
            prevents upstream noise from affecting our /W4 build. -->

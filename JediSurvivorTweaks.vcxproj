@@ -176,6 +176,17 @@
     <ClCompile Include="src\core\cvar_resolver.cpp" />
     <ClCompile Include="src\core\cvar_scanner.cpp" />
     <ClCompile Include="src\core\cvar_system.cpp" />
+    <ClCompile Include="src\core\cvar_watch_registry.cpp" />
+    <ClCompile Include="src\core\graphics_adapter_service.cpp" />
+    <ClCompile Include="src\core\import_address_hook.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)'=='ReleaseAddon'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\core\d3d12_device_observer.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)'=='ReleaseAddon'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\core\pe_imports.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)'=='ReleaseAddon'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\core\pe_utils.cpp" />
     <ClCompile Include="src\hooks\hook_context.cpp" />
     <ClCompile Include="src\tweaks\hook_tweak.cpp" />
@@ -192,6 +203,9 @@
     <ClCompile Include="src\tweaks\graphical_tweaks.cpp" />
     <ClCompile Include="src\tweaks\interpolated_rendering.cpp" />
     <ClCompile Include="src\tweaks\custom_cvars.cpp" />
+    <ClCompile Include="src\tweaks\runtime_control.cpp" />
+    <ClCompile Include="src\tweaks\streaming_pool_policy.cpp" />
+    <ClCompile Include="src\tweaks\streaming_pool_controller.cpp" />
     <ClCompile Include="src\tweaks\streaming_pool_fix.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -203,6 +217,13 @@
     <ClInclude Include="src\core\cvar_resolver.hpp" />
     <ClInclude Include="src\core\cvar_scanner.hpp" />
     <ClInclude Include="src\core\cvar_system.hpp" />
+    <ClInclude Include="src\core\cvar_watch.hpp" />
+    <ClInclude Include="src\core\cvar_watch_registry.hpp" />
+    <ClInclude Include="src\core\graphics_adapter_service.hpp" />
+    <ClInclude Include="src\core\import_address_hook.hpp" />
+    <ClInclude Include="src\core\d3d12_device_observer.hpp" />
+    <ClInclude Include="src\core\pe_imports.hpp" />
+    <ClInclude Include="src\core\streaming_pool_protocol.hpp" />
     <ClInclude Include="src\core\hook.hpp" />
     <ClInclude Include="src\core\hook_engine.hpp" />
     <ClInclude Include="src\core\scoped_virtual_protect.hpp" />
@@ -230,6 +251,8 @@
     <ClInclude Include="src\tweaks\graphical_tweaks.hpp" />
     <ClInclude Include="src\tweaks\interpolated_rendering.hpp" />
     <ClInclude Include="src\tweaks\custom_cvars.hpp" />
+    <ClInclude Include="src\tweaks\streaming_pool_policy.hpp" />
+    <ClInclude Include="src\tweaks\streaming_pool_controller.hpp" />
     <ClInclude Include="src\tweaks\streaming_pool_fix.hpp" />
 
     <ClInclude Include="src\reshade\overlay.hpp" />

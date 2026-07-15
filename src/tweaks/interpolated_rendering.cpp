@@ -35,8 +35,10 @@ std::vector<RuntimeControl> InterpolatedRenderingTweak::GetRuntimeControls() {
             m_irEnabled = v;
             ApplyInterpolatedRendering(m_irEnabled);
         },
-        .configSection = "InterpolatedRendering",
-        .configKey     = "Enabled",
+        .persistence = ControlPersistence{
+            .section = "InterpolatedRendering",
+            .key = "Enabled",
+        },
     }};
 }
 

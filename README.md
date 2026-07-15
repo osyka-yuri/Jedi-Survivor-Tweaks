@@ -36,7 +36,11 @@ All features can be toggled on or off individually via the `JediSurvivorTweaks.i
   - **ChromaticAberration** — toggles `r.SceneColorFringeQuality` on/off.
   - **Vignette** — toggles `r.Tonemapper.Quality` on/off.
 - **InterpolatedRendering** — enables `respawn.InterpolatedRendering` to reduce CPU stutters and camera jitter.
-- **StreamingPoolFix** — locks the streaming pool size to a configured number of gigabytes (`PoolSizeGB`, 0.5–12.0; default 2.0) to prevent the unbounded VRAM growth (memory leak) the game can exhibit. Opt-in (disabled by default).
+- **StreamingPoolFix** — locks the streaming pool size to prevent the unbounded VRAM growth (memory leak) the game can exhibit. Enabled by default. Single key `PoolSizeGB`:
+  - **`auto`** (shipped default) — freezes the first valid engine pool size (engine CVar in exact MiB and/or streaming path bytes). Timeout fallback after ~30 s is **2.0 GiB**, capped on lower-VRAM GPUs.
+  - **Number** (e.g. `2.0`) — manual lock. Every value locked by the mod is limited to **70% of the physical dedicated VRAM** of the GPU actually used by the game. A 24 GiB GPU therefore permits up to 16.8 GiB. The existing `PoolSizeGB` name and UI “GB” label remain for compatibility; calculations use binary GiB/MiB.
+  - If the game GPU cannot be identified, the compatible legacy range **0.5–12.0 GB** is retained and reported in the log and overlay. The mod never guesses from the first or most powerful adapter in the system.
+  - Adapter capacity is resolved asynchronously with retry after transient DXGI failures. The ASI observer survives delay-load resolution and device recreation; a late-loaded ReShade add-on recovers the existing D3D12 device on the next present.
 - **CVars** — applies arbitrary Unreal Engine console variables via the `.ini` file. Resolution scans the game binary's `.rdata` section for the UTF-16 CVar name, then `.text` for references to it, deriving either a global pointer or a direct variable address. If the CVar object isn't yet constructed at startup, the write is queued and retried by a background pump thread (100 ms interval) until success or a 30 s timeout; CVars absent from the binary are dropped immediately on the first scan pass.
 
 ## 🚀 Getting Started
@@ -65,7 +69,8 @@ Once loaded, the **Add-ons → JediSurvivorTweaks** panel provides, per tweak:
 - A green/red **status dot** next to the tweak name (green = loaded; red = disabled in `.ini` or failed to install).
 - A **"Load on launch"** checkbox that persists the tweak's `[Section] Enabled` key. Hooks can't be installed or removed at runtime, so this takes effect on next launch — the live controls below it are the way to change behaviour right now.
 - **Live runtime controls** that take effect immediately:
-  - **Sliders** for the multiplier tweaks: GameplayFOV, CameraDistance, AspectRatioUIFix (range 0–10 with 0.1 steps, or 0.5–1.5 for AspectRatioUIFix), and StreamingPoolFix's **Pool Size (GB)** (0.5–12, 0.1 GB steps).
+  - **Sliders** for the multiplier tweaks: GameplayFOV, CameraDistance, AspectRatioUIFix (range 0–10 with 0.1 steps, or 0.5–1.5 for AspectRatioUIFix), and StreamingPoolFix's **Pool Size (GB)** (0.5 GiB–70% dedicated VRAM, 0.1 GiB steps) when not in auto mode.
+  - **StreamingPoolFix Auto** checkbox — writes `PoolSizeGB=auto` / a numeric size to freeze the engine pool or use the slider. Switching back to manual during the same session restores the previous manual size.
   - **Sharpening on/off** checkbox + **Sharpening Strength** slider (0–10, 0.1 steps).
   - **Chromatic Aberration**, **Vignette**, and **Interpolated Rendering** on/off checkboxes.
 - Per-tweak **Reset** button (top-right of each section) snaps that tweak's controls back to defaults.
@@ -110,8 +115,8 @@ Enabled = true
 Enabled = true
 
 [StreamingPoolFix]
-Enabled = false
-PoolSizeGB = 2.0       ; 0.5-12.0 streaming pool size in GB
+Enabled = true
+PoolSizeGB = auto      ; auto | manual GiB (legacy key name; max 70% VRAM)
 
 [CVars]
 ; r.VSync = 0
@@ -129,10 +134,24 @@ MinLevel = Info         ; Debug | Info | Warning | Error
 - MASM (`ml64`) — wired in via the project's `BuildCustomizations\masm.props/.targets`
 - Target: x64 (Release recommended)
 
-To build from the command line, run `build.bat`. It builds both variants sequentially:
+From a Visual Studio Developer PowerShell, build both release variants with:
+
+```powershell
+msbuild JediSurvivorTweaks.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild
+msbuild JediSurvivorTweaks.sln /p:Configuration=ReleaseAddon /p:Platform=x64 /t:Rebuild
+```
+
+The resulting plugins are:
 
 - `x64\Release\JediSurvivorTweaks.asi` (ASI plugin)
 - `x64\ReleaseAddon\JediSurvivorTweaks.addon64` (ReShade Addon)
+
+Run the matching test binaries before packaging:
+
+```powershell
+& .\x64\Release\tests\JediSurvivorTweaks.Tests.exe
+& .\x64\ReleaseAddon\tests\JediSurvivorTweaks.Tests.exe
+```
 
 > **Note:** Each variant is selected by an MSBuild configuration (`Release` vs `ReleaseAddon`) and is compiled from disjoint entry-point translation units — there are no preprocessor switches in the shared core.
 
@@ -140,11 +159,11 @@ To build from the command line, run `build.bat`. It builds both variants sequent
 
 ```
 src/
-├── core/         # Logger, Config, MemoryScanner, PEUtils, HookEngine,
-│                 # CVarSystem (scanner, resolver, layout constants, per-CVar override table)
+├── core/         # Config/logging, hook and CVar infrastructure, GPU tracking,
+│                 # D3D12/PE observation and the streaming-pool hook protocol
 ├── hooks/        # ASM detours (tweak_hooks.asm) + shared C++ hook context
-├── tweaks/       # Each individual tweak + the unified HookTweak base + manager
-├── reshade/      # ReShade-Addon-only TUs (entry.cpp, overlay.cpp)
+├── tweaks/       # Tweak implementations, runtime controls and pool policy/controller
+├── reshade/      # ReShade-Addon entry point, overlay and control renderer
 ├── external/     # Vendored libraries:
 │   ├── zydis/    #   Zydis 4.1.1 disassembler (MIT)
 │   └── reshade/  #   ReShade SDK headers (header-only, BSD-2-Clause)

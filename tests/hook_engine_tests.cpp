@@ -3,7 +3,7 @@
 #include "core/instruction_relocator.hpp"
 #include "hooks/hook_context.hpp"
 #include "tweaks/hook_tweak.hpp"
-#include "tweaks/streaming_pool_fix.hpp"
+#include "test_check.hpp"
 
 #include <windows.h>
 
@@ -12,20 +12,12 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
-#include <limits>
 #include <string_view>
 #include <vector>
 
 int g_failures = 0;
 
 namespace {
-
-void Check(bool condition, std::string_view message) {
-    if (!condition) {
-        ++g_failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
-}
 
 #pragma section(".testcode", read, execute)
 __declspec(allocate(".testcode")) alignas(16)
@@ -318,32 +310,27 @@ void TestMixedContinuationGroup() {
     Check(reg1 && reg2, "mixed continuation sites must register successfully");
 }
 
-void TestGbToPayloadBytes() {
-    using jst::tweaks::detail::GbToPayloadBytes;
-
-    constexpr uint64_t kOneGb =
-        static_cast<uint64_t>(1024ULL) * 1024ULL * 1024ULL;
-    Check(GbToPayloadBytes(1.0f, 12.0f) == kOneGb,
-          "1 GB must convert to exact byte count");
-    Check(GbToPayloadBytes(2.0f, 12.0f) == 2 * kOneGb,
-          "2 GB must convert to exact byte count");
-    Check(GbToPayloadBytes(12.0f, 12.0f) == 12 * kOneGb,
-          "12 GB must clamp to the configured maximum");
-    Check(GbToPayloadBytes(std::numeric_limits<float>::quiet_NaN(), 12.0f, 2.0f) ==
-              GbToPayloadBytes(2.0f, 12.0f, 2.0f),
-          "non-finite input must fall back to the default pool size");
-}
-
 } // namespace
 
-void TestSliderUtils();       // slider_utils_tests.cpp
-void TestRuntimeControls();   // runtime_control_tests.cpp
+void TestSliderUtils();                 // slider_utils_tests.cpp
+void TestRuntimeControls();             // runtime_control_tests.cpp
+void TestStreamingPoolController();     // streaming_pool_controller_tests.cpp
+void TestPoolSizeSetting();             // pool_size_setting_tests.cpp
+void TestCVarWatch();                   // cvar_watch_tests.cpp
+void TestGraphicsAdapterService();       // graphics_adapter_service_tests.cpp
+void TestImportAddressHook();            // import_address_hook_tests.cpp
+void TestPeImports();                    // pe_imports_tests.cpp
 
 int main() {
     TestInstructionWindows();
     TestRelocation();
     TestMultiContextMultiplier();
-    TestGbToPayloadBytes();
+    TestStreamingPoolController();
+    TestPoolSizeSetting();
+    TestGraphicsAdapterService();
+    TestPeImports();
+    TestImportAddressHook();
+    TestCVarWatch();
     TestSliderUtils();
     TestRuntimeControls();
     TestMixedContinuationGroup();
@@ -354,6 +341,6 @@ int main() {
         std::cerr << g_failures << " test(s) failed\n";
         return 1;
     }
-    std::cout << "All hook engine tests passed\n";
+    std::cout << "All tests passed\n";
     return 0;
 }

@@ -92,6 +92,8 @@ public:
     [[nodiscard]] std::string_view Description() const noexcept override { return m_description; }
     [[nodiscard]] bool IsEnabledByDefault() const noexcept override { return m_enabledByDefault; }
     [[nodiscard]] std::vector<RuntimeControl> GetRuntimeControls() override;
+    [[nodiscard]] RuntimeControlResetResult ResetRuntimeControls(
+        jst::core::Config& config) override;
 
 protected:
     virtual void OnConfigLoaded(jst::core::Config& /*config*/) {}
@@ -102,8 +104,6 @@ protected:
     }
 
     void ApplyMultiplier(float multiplier);
-    void SetPayload0(uint64_t value) { PrimaryContext().payload0 = value; }
-    [[nodiscard]] uint64_t GetPayload0() const { return PrimaryContext().payload0; }
     [[nodiscard]] float LoadedMultiplier() const noexcept { return m_loadedMultiplier; }
 
 private:

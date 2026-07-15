@@ -1,36 +1,35 @@
 #pragma once
 
-#include "cvar_resolver.hpp"
 #include "cvar_overrides.hpp"
+#include "cvar_resolver.hpp"
 #include "cvar_scanner.hpp"
-
-#include "cvar_layout.hpp"
+#include "cvar_watch.hpp"
 
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <unordered_map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
 namespace jst::core {
 
+class CVarWatchRegistry;
+
+#if defined(JST_UNIT_TESTS)
+class CVarSystemTestAccess;
+#endif
+
 /**
- * Thread-safe resolver and writer for Unreal Engine console variables.
- *
- * Resolution strategy:
- *   1. Scan .rdata for the CVar name string.
- *   2. Scan .text for references to that string.
- *   3. Derive either a global pointer (preferred) or a direct reference variable.
- *   4. Cache the resolution and write the value.
- *
- * If the CVar object isn't constructed yet, the write is queued and retried
- * by a background pump thread until success or timeout.
+ * Thread-safe resolver, writer and pump for Unreal Engine console variables.
+ * Unknown names are scanned once, late-constructed objects are retried, and
+ * integer observations share the same pump through RAII subscriptions.
  */
 class CVarSystem final {
 public:
@@ -38,12 +37,15 @@ public:
 
     bool SetInt(std::wstring_view name, int32_t value);
     bool SetFloat(std::wstring_view name, float value);
+    [[nodiscard]] CVarWatchSubscription WatchInt(IntWatchRequest request);
 
     void StartPump(std::chrono::milliseconds period = std::chrono::milliseconds(100));
     void StopPump();
 
 private:
-    CVarSystem() = default;
+    friend class CVarWatchSubscription;
+
+    CVarSystem();
     ~CVarSystem();
 
     CVarSystem(const CVarSystem&) = delete;
@@ -51,62 +53,65 @@ private:
     CVarSystem(CVarSystem&&) = delete;
     CVarSystem& operator=(CVarSystem&&) = delete;
 
-    // A CVar can be in one of three internal states:
-    // 1. Unknown:  No entry in m_cache — CVar has never been requested.
-    // 2. Pending:  Entry exists, but resolution hasn't succeeded yet.
-    //              Sub-state a (awaiting scan):   scanData.strAddr == 0
-    //              Sub-state b (awaiting object): scanData.strAddr != 0, but
-    //                          the CVar heap object is still null (late init).
-    // 3. Resolved: Object is live; write targets cached in ResolvedState.
     using CVarValue = std::variant<int32_t, float>;
 
     struct PendingState {
         ScanEntry scanData;
-        CVarValue targetValue;
+        // nullopt means resolve for observers without an outstanding write.
+        std::optional<CVarValue> targetValue;
         std::chrono::steady_clock::time_point firstSeen;
     };
 
-    struct ResolvedState {
-        ResolvedCVar rc;
+    struct ResolvedEntry {
+        explicit ResolvedEntry(ResolvedCVar value) : resolved(std::move(value)) {}
+
+        ResolvedCVar resolved;
+        mutable std::mutex valueMutex;
+        std::optional<CVarValue> pendingWrite;
+        std::chrono::steady_clock::time_point pendingWriteSince{};
     };
 
-    struct CVarState {
-        std::variant<std::monostate, PendingState, ResolvedState> state;
-    };
+    using ResolvedEntryPtr = std::shared_ptr<ResolvedEntry>;
+    using CVarState = std::variant<PendingState, ResolvedEntryPtr>;
 
     template <typename T>
     bool SetTyped(std::wstring_view name, T value);
-
     template <typename T>
-    bool WriteValue(const ResolvedCVar& rc, T value);
-
-    void UpdateFlags(const ResolvedCVar& rc, std::wstring_view name);
-
+    bool WriteValue(const ResolvedCVar& resolved, T value);
     template <typename T>
-    bool WriteResolved(const ResolvedCVar& rc, std::wstring_view name, T value);
+    bool WriteResolved(const ResolvedCVar& resolved, std::wstring_view name, T value);
 
-    [[nodiscard]] const ModuleInfo* GetOrFetchMod();
+    void UpdateFlags(const ResolvedCVar& resolved, std::wstring_view name);
+    void EnqueuePendingLocked(std::wstring_view name, std::optional<CVarValue> target);
+    [[nodiscard]] bool HasPendingLocked() const;
+    [[nodiscard]] std::optional<int32_t> ReadResolvedInt(std::wstring_view name) const;
+    void RetryPendingWrites();
 
+    [[nodiscard]] const ModuleInfo* GetOrFetchModule();
     void PerformInitialScan();
+    void ResolvePendingCVars(const ModuleInfo& module);
+    bool CommitResolved(std::wstring_view name, const ResolvedCVar& resolved);
     void PumpLoop(std::chrono::milliseconds period);
 
-    std::mutex m_mutex;
-    // Maps a CVar name to its current state.
+    void CancelWatch(uint64_t id);
+
+    mutable std::mutex m_mutex;
     std::unordered_map<std::wstring, CVarState, WStringHash, std::equal_to<>> m_cache;
-    // Names of CVars that were just added and need an initial .rdata/.text scan.
     std::vector<std::wstring> m_needsInitialScan;
-    // Number of CVars currently in PendingState (protected by m_mutex).
-    // Used by PumpLoop to distinguish "idle — wait indefinitely" from
-    // "pending retries — wake every period".
-    size_t m_pendingCount = 0;
+    std::chrono::milliseconds m_pendingTimeout{30'000};
 
-    std::optional<ModuleInfo> m_mod;
-    std::once_flag m_modOnce;
+    mutable std::mutex m_moduleMutex;
+    std::optional<ModuleInfo> m_module;
 
+    std::unique_ptr<CVarWatchRegistry> m_watches;
     std::thread m_pumpThread;
     std::condition_variable m_pumpCv;
     bool m_pumpRunning = false;
     bool m_pumpStopRequested = false;
+
+#if defined(JST_UNIT_TESTS)
+    friend class CVarSystemTestAccess;
+#endif
 };
 
 } // namespace jst::core

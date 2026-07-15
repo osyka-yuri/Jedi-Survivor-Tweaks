@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include "core/d3d12_device_observer.hpp"
 #include "main_app.hpp"
 
 namespace {
@@ -25,6 +26,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_hModule = hModule;
         DisableThreadLibraryCalls(hModule);
+        // Must run before bootstrap and before the game can create its D3D12
+        // device. The observer performs only bounded PE/IAT work here.
+        (void)jst::core::InstallD3D12DeviceObserverEarly();
         InitializeASI();
     }
     return TRUE;

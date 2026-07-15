@@ -27,16 +27,8 @@ inline constexpr FloatSliderSpec kSharpenSliderSpec{
     .step = kSliderStepTenth,
 };
 
-inline constexpr FloatSliderSpec kPoolSizeSliderSpec{
-    .min = 0.5f,
-    .max = 12.0f,
-    .defaultValue = 2.0f,
-    .step = kSliderStepTenth,
-};
-
 static_assert(IsValidSpec(kMultiplierSliderSpec));
 static_assert(IsValidSpec(kAspectRatioSliderSpec));
 static_assert(IsValidSpec(kSharpenSliderSpec));
-static_assert(IsValidSpec(kPoolSizeSliderSpec));
 
 } // namespace jst::tweaks

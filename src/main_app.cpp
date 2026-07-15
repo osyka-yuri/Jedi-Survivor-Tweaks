@@ -2,6 +2,7 @@
 
 #include "core/logging.hpp"
 #include "core/cvar_system.hpp"
+#include "core/graphics_adapter_service.hpp"
 #include "tweaks/letterbox_pillarbox_fix.hpp"
 #include "tweaks/gameplay_fov.hpp"
 #include "tweaks/camera_distance.hpp"
@@ -70,6 +71,7 @@ Application::Application(const fs::path& baseDir, LoaderVariant variant)
     jst::core::Logger::Instance().SetMinLevel(
         jst::core::ParseLogLevel(minLevelStr, jst::core::LogLevel::Info));
 
+    jst::core::GraphicsAdapterService::Instance().Start();
     jst::core::CVarSystem::Instance().StartPump();
 
     m_tweakManager.RegisterTweak<jst::tweaks::LetterboxPillarboxFix>();
@@ -91,6 +93,12 @@ Application::Application(const fs::path& baseDir, LoaderVariant variant)
 }
 
 Application::~Application() {
+    g_runningApp.store(nullptr, std::memory_order_release);
+    // Watch callbacks run on the CVar pump thread and may touch tweaks.
+    // Join both background services while tweak owners are still alive, then
+    // tear down their subscriptions and hooks.
+    jst::core::CVarSystem::Instance().StopPump();
+    jst::core::GraphicsAdapterService::Instance().Stop();
     m_tweakManager.Shutdown();
     m_hookEngine.Shutdown();
     jst::core::Logger::Instance().Shutdown();

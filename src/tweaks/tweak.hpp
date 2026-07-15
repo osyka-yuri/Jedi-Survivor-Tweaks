@@ -55,6 +55,13 @@ public:
     /// the render thread -- all current apply targets (context multipliers,
     /// CVar calls) are render-thread-safe.
     [[nodiscard]] virtual std::vector<RuntimeControl> GetRuntimeControls() { return {}; }
+
+    /// Reset a composite runtime model and persist its defaults. Unsupported
+    /// delegates to generic per-control reset; Unchanged is still handled.
+    [[nodiscard]] virtual RuntimeControlResetResult ResetRuntimeControls(
+        jst::core::Config& /*config*/) {
+        return RuntimeControlResetResult::Unsupported;
+    }
 };
 
 } // namespace jst::tweaks

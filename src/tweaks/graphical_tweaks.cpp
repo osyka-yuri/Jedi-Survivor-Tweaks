@@ -75,8 +75,10 @@ std::vector<RuntimeControl> GraphicalTweaks::GetRuntimeControls() {
             m_sharpenEnabled = v;
             ApplySharpen(m_sharpenEnabled, m_sharpenStrength);
         },
-        .configSection = "Sharpening",
-        .configKey     = "Enabled",
+        .persistence = ControlPersistence{
+            .section = "Sharpening",
+            .key = "Enabled",
+        },
         .tooltip       = "Enable or disable the post-process sharpening filter.",
     });
 
@@ -100,8 +102,10 @@ std::vector<RuntimeControl> GraphicalTweaks::GetRuntimeControls() {
             m_caEnabled = v;
             ApplyChromaticAberration(m_caEnabled);
         },
-        .configSection = "ChromaticAberration",
-        .configKey     = "Enabled",
+        .persistence = ControlPersistence{
+            .section = "ChromaticAberration",
+            .key = "Enabled",
+        },
         .tooltip       = "Color fringing at screen edges. Disable for a cleaner image.",
     });
 
@@ -113,8 +117,10 @@ std::vector<RuntimeControl> GraphicalTweaks::GetRuntimeControls() {
             m_vignetteEnabled = v;
             ApplyVignette(m_vignetteEnabled);
         },
-        .configSection = "Vignette",
-        .configKey     = "Enabled",
+        .persistence = ControlPersistence{
+            .section = "Vignette",
+            .key = "Enabled",
+        },
         .tooltip       = "Darkens the corners of the screen. Disable for a uniform look.",
     });
 

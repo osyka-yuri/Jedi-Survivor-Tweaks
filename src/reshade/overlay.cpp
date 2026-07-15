@@ -33,11 +33,11 @@ namespace {
     constexpr ULONGLONG kSaveDebounceMs = 500;
 
 using jst::overlay::ComputeLabelWidth;
-using jst::overlay::PersistControl;
 using jst::overlay::RenderControl;
-using jst::overlay::ResetControlToDefault;
 using jst::overlay::TextDisabledSv;
 using jst::overlay::TextSv;
+using jst::tweaks::PersistControl;
+using jst::tweaks::ResetTweakControls;
 
 } // namespace
 
@@ -73,10 +73,7 @@ void DrawOverlay(::reshade::api::effect_runtime* /*runtime*/) {
             const float xPos = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - kResetButtonWidth;
             ImGui::SameLine(xPos, 0.0f);
             if (ImGui::Button("Reset", ImVec2(kResetButtonWidth, 0))) {
-                for (auto& ctrl : controls) {
-                    if (overlay::ResetControlToDefault(ctrl, rc))
-                        anyChanged = true;
-                }
+                anyChanged = ResetTweakControls(tw, controls, rc) || anyChanged;
             }
         }
 
@@ -95,7 +92,7 @@ void DrawOverlay(::reshade::api::effect_runtime* /*runtime*/) {
         for (auto& ctrl : controls) {
             ImGui::PushID(ctrlIdx++);
             if (overlay::RenderControl(ctrl, labelWidth)) {
-                overlay::PersistControl(ctrl, rc);
+                PersistControl(ctrl, rc);
                 anyChanged = true;
             }
             ImGui::PopID();
@@ -107,15 +104,6 @@ void DrawOverlay(::reshade::api::effect_runtime* /*runtime*/) {
         ImGui::Spacing();
     });
 
-    if (anyChanged) {
-        debounce.MarkDirty();
-    }
-
-    if (debounce.ShouldFlush()) {
-        (void)rc.Save();
-        debounce.Reset();
-    }
-
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
@@ -123,11 +111,17 @@ void DrawOverlay(::reshade::api::effect_runtime* /*runtime*/) {
     if (ImGui::Button("Reset to Defaults", ImVec2(0, 0))) {
         tm.IterateTweaks([&anyChanged, &rc](jst::tweaks::ITweak& tw) {
             auto controls = tw.GetRuntimeControls();
-            for (auto& ctrl : controls) {
-                if (overlay::ResetControlToDefault(ctrl, rc))
-                    anyChanged = true;
-            }
+            anyChanged = ResetTweakControls(tw, controls, rc) || anyChanged;
         });
+    }
+
+    if (anyChanged) {
+        debounce.MarkDirty();
+    }
+
+    if (debounce.ShouldFlush()) {
+        (void)rc.Save();
+        debounce.Reset();
     }
 
     if (!rc.GetPath().empty()) {

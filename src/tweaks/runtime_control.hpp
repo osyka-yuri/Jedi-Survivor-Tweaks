@@ -3,28 +3,41 @@
 #include "slider_utils.hpp"
 
 #include <functional>
+#include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
 
+namespace jst::core {
+class Config;
+}
+
 namespace jst::tweaks {
 
-// All string_view fields below must point at storage that outlives the
-// RuntimeControl vector returned by GetRuntimeControls(). In practice every
-// callsite uses string literals or owning std::string members of the tweak,
-// both of which are stable for the tweak lifetime.
+class ITweak;
 
-/// A slider that mutates a single float value (e.g. a hook multiplier or a
-/// sharpening strength).  `current` is a per-frame snapshot; the overlay
-/// passes `&current` to ImGui::SliderFloat and calls `apply(current)` when
-/// the value changes.
+using PersistControlOverride = std::function<void(jst::core::Config&)>;
+
+struct ControlPersistence {
+    std::string_view section;
+    std::string_view key;
+    PersistControlOverride overrideAction;
+};
+
+enum class RuntimeControlResetResult : uint8_t {
+    Unsupported,
+    Unchanged,
+    Changed,
+};
+
+// All string_view fields must point at literals or tweak-owned storage that
+// outlives the ephemeral control vector returned for the current frame.
 struct SliderFloatControl {
     std::string_view label;
     FloatSliderSpec spec;
     float current = 0.0f;
     std::function<void(float)> apply;
-    std::string_view configSection;
-    std::string_view configKey;
+    ControlPersistence persistence;
     std::string_view tooltip;
 };
 
@@ -42,17 +55,16 @@ struct SliderFloatControl {
         .spec = spec,
         .current = LoadSliderValue(current, spec),
         .apply = std::move(apply),
-        .configSection = configSection,
-        .configKey = configKey,
+        .persistence = ControlPersistence{
+            .section = configSection,
+            .key = configKey,
+        },
         .tooltip = tooltip,
     };
 }
 
-// Snap rawValue onto the spec grid and call apply() when it differs from the
-// tweak-owned baseline captured before ImGui mutated control.current.
-[[nodiscard]] inline bool TryCommitSliderEdit(SliderFloatControl& control,
-                                              float rawValue,
-                                              float persistedBaseline) {
+[[nodiscard]] inline bool TryCommitSliderEdit(
+    SliderFloatControl& control, float rawValue, float persistedBaseline) {
     const float normalized = NormalizeFloatSlider(rawValue, control.spec);
     control.current = normalized;
     if (SliderValuesNearlyEqual(normalized, persistedBaseline)) {
@@ -62,30 +74,34 @@ struct SliderFloatControl {
     return true;
 }
 
-// Idle frame: restore the widget value from tweak-owned state.
-inline void RestoreSliderBaseline(SliderFloatControl& control, float persistedBaseline) {
+inline void RestoreSliderBaseline(
+    SliderFloatControl& control, float persistedBaseline) noexcept {
     control.current = persistedBaseline;
 }
 
-/// A boolean toggle that mutates a single bool value (e.g. a CVar enable
-/// flag).  `current` is a per-frame snapshot; the overlay passes `&current`
-/// to ImGui::Checkbox and calls `apply(current)` when the value changes.
 struct CheckboxControl {
-    std::string_view          label;
-    bool                      current;
-    bool                      defaultValue;
+    std::string_view label;
+    bool current = false;
+    bool defaultValue = false;
     std::function<void(bool)> apply;
-    std::string_view          configSection;
-    std::string_view          configKey;
-    std::string_view          tooltip;
+    ControlPersistence persistence;
+    std::string_view tooltip;
 };
 
-/// A read-only informational line rendered as disabled text.  No `apply`
-/// callback; returns false from RenderControl so it never triggers saves.
+// Dynamic informational text owns its storage; no mutable tweak-side string
+// is needed merely to keep a string_view alive through the frame.
 struct LabelControl {
-    std::string_view label;
+    std::string label;
 };
 
 using RuntimeControl = std::variant<SliderFloatControl, CheckboxControl, LabelControl>;
+
+void PersistControl(const RuntimeControl& control, jst::core::Config& config);
+[[nodiscard]] bool ResetControlToDefault(
+    RuntimeControl& control, jst::core::Config& config);
+[[nodiscard]] bool ResetTweakControls(
+    ITweak& tweak,
+    std::vector<RuntimeControl>& controls,
+    jst::core::Config& config);
 
 } // namespace jst::tweaks

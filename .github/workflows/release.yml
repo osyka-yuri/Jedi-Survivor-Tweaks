@@ -21,11 +21,45 @@ jobs:
     - name: Add msbuild to PATH
       uses: microsoft/setup-msbuild@v3
 
+    - name: Validate release metadata
+      id: release_metadata
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $version = $env:GITHUB_REF_NAME
+        if ($version -notmatch '^v(?<number>\d+\.\d+\.\d+)$') {
+          throw "Release tag '$version' must use the vMAJOR.MINOR.PATCH format."
+        }
+
+        $versionNumber = $Matches.number
+        $changelog = Get-Content CHANGELOG.md -Raw
+        $escapedVersion = [regex]::Escape($versionNumber)
+        $pattern = "(?ms)^## \[$escapedVersion\] - \d{4}-\d{2}-\d{2}\r?\n.*?(?=^## \[|\z)"
+        $releaseSection = [regex]::Match($changelog, $pattern)
+        if (-not $releaseSection.Success) {
+          throw "CHANGELOG.md has no dated section for $version."
+        }
+
+        $releaseSection.Value.TrimEnd() | Set-Content release_notes.txt -Encoding utf8
+        "notes_file=release_notes.txt" >> $env:GITHUB_OUTPUT
+
     - name: Build ASI (Release|x64)
       run: msbuild JediSurvivorTweaks.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild
 
+    - name: Test ASI configuration
+      shell: pwsh
+      run: |
+        & .\x64\Release\tests\JediSurvivorTweaks.Tests.exe
+        if ($LASTEXITCODE -ne 0) { throw "Release tests failed with exit code $LASTEXITCODE." }
+
     - name: Build ReShade Addon (ReleaseAddon|x64)
       run: msbuild JediSurvivorTweaks.sln /p:Configuration=ReleaseAddon /p:Platform=x64 /t:Rebuild
+
+    - name: Test ReShade Addon configuration
+      shell: pwsh
+      run: |
+        & .\x64\ReleaseAddon\tests\JediSurvivorTweaks.Tests.exe
+        if ($LASTEXITCODE -ne 0) { throw "ReleaseAddon tests failed with exit code $LASTEXITCODE." }
 
     - name: Create ASI zip
       run: |
@@ -43,34 +77,24 @@ jobs:
         cp config/JediSurvivorTweaks.ini addon_zip/
         Compress-Archive -Path addon_zip/* -DestinationPath JediSurvivorTweaks_${version}_ReShadeAddon.zip
 
-    - name: Extract Changelog
-      id: extract_changelog
+    - name: Create checksums
+      shell: pwsh
       run: |
-        $version = $env:GITHUB_REF_NAME
-        # Remove 'v' prefix if we want just the number, but our changelog uses e.g. [1.1.4]
-        $versionNumber = $version -replace '^v', ''
-        
-        $changelog = Get-Content CHANGELOG.md -Raw
-        
-        # Regex to match the section for the specific version
-        $pattern = "(?s)## \[$versionNumber\] - .*?(?=## \[|\Z)"
-        
-        if ($changelog -match $pattern) {
-          $releaseNotes = $matches[0]
-        } else {
-          $releaseNotes = "No release notes found for $versionNumber"
-        }
-        
-        $releaseNotes | Out-File -FilePath release_notes.txt -Encoding utf8
-        echo "notes_file=release_notes.txt" >> $env:GITHUB_OUTPUT
+        Get-ChildItem JediSurvivorTweaks_*.zip |
+          Sort-Object Name |
+          ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content SHA256SUMS.txt -Encoding ascii
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v3
       if: startsWith(github.ref, 'refs/tags/')
       with:
-        body_path: ${{ steps.extract_changelog.outputs.notes_file }}
+        body_path: ${{ steps.release_metadata.outputs.notes_file }}
         files: |
           JediSurvivorTweaks_*_ASI.zip
           JediSurvivorTweaks_*_ReShadeAddon.zip
+          SHA256SUMS.txt
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
