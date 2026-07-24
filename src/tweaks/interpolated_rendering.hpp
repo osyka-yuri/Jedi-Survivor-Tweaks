@@ -22,7 +22,7 @@ public:
 
 private:
     bool m_initialized = false;
-    bool m_irEnabled   = true;      // loaded from config in Initialize; mutated by overlay
+    bool m_irEnabled   = false;     // loaded from config in Initialize; mutated by overlay
 };
 
 } // namespace jst::tweaks

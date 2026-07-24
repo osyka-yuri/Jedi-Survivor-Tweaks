@@ -24,7 +24,6 @@ HookTweak::HookTweak(std::string name,
           HookBinding{m_name, std::move(target), detour, slot},
       },
       m_runtimeFloatConfig(std::move(runtimeFloatConfig)),
-      m_overlayEnabledPref(enabledByDefault),
       m_enabledByDefault(enabledByDefault) {}
 
 HookTweak::HookTweak(std::string name,
@@ -36,7 +35,6 @@ HookTweak::HookTweak(std::string name,
       m_description(std::move(description)),
       m_bindings(std::move(bindings)),
       m_runtimeFloatConfig(std::move(runtimeFloatConfig)),
-      m_overlayEnabledPref(enabledByDefault),
       m_enabledByDefault(enabledByDefault) {}
 
 std::expected<void, std::string>

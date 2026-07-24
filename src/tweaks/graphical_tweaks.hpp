@@ -21,13 +21,13 @@ public:
     [[nodiscard]] std::vector<RuntimeControl> GetRuntimeControls() override;
 
 private:
-    // All m_*Enabled fields are loaded from config in Initialize (defaulting
-    // to true) and mutated by the runtime overlay sliders/checkboxes.
+    // All m_*Enabled fields default to false (tweak not active). Initialize()
+    // loads the real values from config; the overlay mutates them at runtime.
     bool  m_initialized     = false;
-    bool  m_sharpenEnabled  = true;
+    bool  m_sharpenEnabled  = false;
     float m_sharpenStrength = 1.0f;
-    bool  m_caEnabled       = true;
-    bool  m_vignetteEnabled = true;
+    bool  m_caEnabled       = false;
+    bool  m_vignetteEnabled = false;
 };
 
 } // namespace jst::tweaks

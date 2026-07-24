@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-07-24
+
+### Fixed
+- **ReShade overlay:** checkboxes for disabled tweaks (`Enabled = false` in the INI) no longer appear checked on launch.
+
 ## [1.4.1] - 2026-07-15
 
 ### Fixed
