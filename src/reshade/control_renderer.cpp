@@ -3,13 +3,8 @@
 
 #include "control_renderer.hpp"
 
-#pragma warning(push)
-#pragma warning(disable: 4100)
-#pragma warning(disable: 4127)
-#pragma warning(disable: 4324)
-#include <external/reshade/imgui_compat.hpp>
-#include <external/reshade/reshade.hpp>
-#pragma warning(pop)
+#include <reshade/imgui_compat.hpp>
+#include <reshade/reshade.hpp>
 
 #include <algorithm>
 
@@ -36,7 +31,7 @@ namespace {
         ImGui::SetCursorPosX(std::max(columnX, labelEndX + kLabelColumnGapPx));
     }
 
-    [[nodiscard]] bool RenderSliderFloatControl(
+    [[nodiscard]] jst::tweaks::RuntimeEditResult RenderSliderFloatControl(
         jst::tweaks::SliderFloatControl& c, float labelWidth) {
         AlignSliderLabel(c, labelWidth);
 
@@ -58,15 +53,16 @@ namespace {
             sliderFlags);
         ImGui::PopItemWidth();
 
-        bool changed = false;
+        jst::tweaks::RuntimeEditResult result;
         if (ImGui::IsItemActive() || ImGui::IsItemEdited() || ImGui::IsItemDeactivatedAfterEdit()) {
-            changed = jst::tweaks::TryCommitSliderEdit(c, c.current, persisted);
+            result = jst::tweaks::TryCommitSliderEdit(
+                c, c.current, persisted);
         } else {
             jst::tweaks::RestoreSliderBaseline(c, persisted);
         }
 
         ShowTooltipIfAny(c.tooltip);
-        return changed;
+        return result;
     }
 
 } // namespace
@@ -108,19 +104,26 @@ float ComputeLabelWidth(const std::vector<jst::tweaks::RuntimeControl>& controls
     return std::max(responsive, widestSliderLabel + kLabelColumnGapPx);
 }
 
-bool RenderControl(jst::tweaks::RuntimeControl& ctrl, float labelWidth) {
-    return std::visit([labelWidth](auto& c) -> bool {
+jst::tweaks::RuntimeEditResult RenderControl(
+    jst::tweaks::RuntimeControl& ctrl,
+    float labelWidth) {
+    return std::visit([labelWidth](auto& c) -> jst::tweaks::RuntimeEditResult {
         using T = std::decay_t<decltype(c)>;
         if constexpr (std::is_same_v<T, jst::tweaks::SliderFloatControl>) {
             return RenderSliderFloatControl(c, labelWidth);
         } else if constexpr (std::is_same_v<T, jst::tweaks::CheckboxControl>) {
+            const bool previous = c.current;
             const bool changed = ImGui::Checkbox(c.label.data(), &c.current);
-            if (changed) c.apply(c.current);
+            auto result = changed ? c.apply(c.current)
+                                  : jst::tweaks::RuntimeEditResult{};
+            if (changed && !result.ShouldPersist()) {
+                c.current = previous;
+            }
             ShowTooltipIfAny(c.tooltip);
-            return changed;
+            return result;
         } else {
             TextDisabledSv(c.label);
-            return false;
+            return {};
         }
     }, ctrl);
 }

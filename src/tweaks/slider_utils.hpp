@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace jst::tweaks {
 
@@ -41,35 +42,113 @@ struct FloatSliderSpec {
 
 namespace detail {
 
+inline constexpr int kMaxSliderDecimalPlaces = 6;
+
+[[nodiscard]] inline int SliderDecimalPlaces(float value) noexcept {
+    if (!std::isfinite(value)) {
+        return 0;
+    }
+
+    double scale = 1.0;
+    for (int places = 0; places <= kMaxSliderDecimalPlaces; ++places) {
+        const double scaled = static_cast<double>(value) * scale;
+        const double tolerance =
+            1e-7 * std::max(1.0, std::fabs(scaled));
+        if (std::fabs(scaled - std::round(scaled)) <= tolerance) {
+            return places;
+        }
+        scale *= 10.0;
+    }
+    return kMaxSliderDecimalPlaces;
+}
+
+[[nodiscard]] inline int64_t DecimalScale(int places) noexcept {
+    int64_t scale = 1;
+    for (int index = 0; index < places; ++index) {
+        scale *= 10;
+    }
+    return scale;
+}
+
+struct SliderGrid {
+    int64_t scale = 1;
+    int64_t minUnits = 0;
+    int64_t maxUnits = 0;
+    int64_t stepUnits = 0;
+};
+
+[[nodiscard]] inline SliderGrid MakeSliderGrid(
+    const FloatSliderSpec& spec) noexcept {
+    const int places = std::max(
+        SliderDecimalPlaces(spec.min),
+        SliderDecimalPlaces(spec.step));
+    const int64_t scale = DecimalScale(places);
+    return SliderGrid{
+        .scale = scale,
+        .minUnits = std::llround(static_cast<double>(spec.min) * scale),
+        .maxUnits = std::llround(static_cast<double>(spec.max) * scale),
+        .stepUnits = std::llround(static_cast<double>(spec.step) * scale),
+    };
+}
+
 [[nodiscard]] inline int SliderStepCount(const FloatSliderSpec& spec) noexcept {
     if (!HasSliderStep(spec.step)) {
         return 0;
     }
 
-    const double span = static_cast<double>(spec.max) - static_cast<double>(spec.min);
-    const double step = static_cast<double>(spec.step);
-    if (span <= 0.0 || step <= 0.0) {
+    const SliderGrid grid = MakeSliderGrid(spec);
+    const int64_t spanUnits = grid.maxUnits - grid.minUnits;
+    if (spanUnits <= 0 || grid.stepUnits <= 0) {
         return 0;
     }
 
-    return static_cast<int>(std::llround(span / step));
+    const int64_t count = std::llround(
+        static_cast<double>(spanUnits) /
+        static_cast<double>(grid.stepUnits));
+    return static_cast<int>(std::clamp<int64_t>(
+        count,
+        0,
+        std::numeric_limits<int>::max()));
 }
 
-[[nodiscard]] inline int ValueToStepIndex(double value, double min, double step, int maxIndex) noexcept {
-    if (step <= 0.0) return 0;
-    int index = static_cast<int>(std::llround((value - min) / step));
-    return std::clamp(index, 0, maxIndex);
+[[nodiscard]] inline int ValueToStepIndex(
+    double value,
+    const SliderGrid& grid,
+    int maxIndex) noexcept {
+    if (grid.stepUnits <= 0) {
+        return 0;
+    }
+    const double scaledValue = value * static_cast<double>(grid.scale);
+    const double index = std::round(
+        (scaledValue - static_cast<double>(grid.minUnits)) /
+        static_cast<double>(grid.stepUnits));
+    if (index <= 0.0) {
+        return 0;
+    }
+    if (index >= static_cast<double>(maxIndex)) {
+        return maxIndex;
+    }
+    return static_cast<int>(index);
 }
 
 [[nodiscard]] inline float StepIndexToValue(
-    int index, double min, double step, int maxIndex, float declaredMax) noexcept {
+    int index,
+    const SliderGrid& grid,
+    int maxIndex,
+    float declaredMax) noexcept {
     if (index >= maxIndex) {
         return declaredMax;
     }
     if (index <= 0) {
-        return static_cast<float>(min);
+        return static_cast<float>(
+            static_cast<double>(grid.minUnits) /
+            static_cast<double>(grid.scale));
     }
-    return static_cast<float>(min + static_cast<double>(index) * step);
+    const int64_t valueUnits =
+        grid.minUnits + static_cast<int64_t>(index) * grid.stepUnits;
+    return static_cast<float>(
+        static_cast<double>(valueUnits) /
+        static_cast<double>(grid.scale));
 }
 
 [[nodiscard]] inline float SliderIndexToValue(int index, const FloatSliderSpec& spec) noexcept {
@@ -79,10 +158,10 @@ namespace detail {
 
     const int maxIndex = SliderStepCount(spec);
     const int clamped = std::clamp(index, 0, maxIndex);
+    const SliderGrid grid = MakeSliderGrid(spec);
     return StepIndexToValue(
         clamped,
-        static_cast<double>(spec.min),
-        static_cast<double>(spec.step),
+        grid,
         maxIndex,
         spec.max);
 }
@@ -93,15 +172,14 @@ namespace detail {
     }
 
     const float clamped = std::clamp(value, spec.min, spec.max);
-    const double minD = static_cast<double>(spec.min);
-    const double stepD = static_cast<double>(spec.step);
+    const SliderGrid grid = MakeSliderGrid(spec);
     const int maxIndex = SliderStepCount(spec);
 
     if (clamped >= spec.max || SliderValuesNearlyEqual(clamped, spec.max)) {
         return maxIndex;
     }
 
-    return ValueToStepIndex(static_cast<double>(clamped), minD, stepD, maxIndex);
+    return ValueToStepIndex(static_cast<double>(clamped), grid, maxIndex);
 }
 
 } // namespace detail
@@ -127,19 +205,15 @@ namespace detail {
         return "%.3f";
     }
 
-    struct Threshold { float minStep; const char* fmt; };
-    constexpr Threshold kTable[] = {
-        {1.0f,  "%.0f"},
-        {0.1f,  "%.1f"},
-        {0.01f, "%.2f"},
-    };
-
-    for (const auto& entry : kTable) {
-        if (step >= entry.minStep) {
-            return entry.fmt;
-        }
+    switch (detail::SliderDecimalPlaces(step)) {
+    case 0: return "%.0f";
+    case 1: return "%.1f";
+    case 2: return "%.2f";
+    case 3: return "%.3f";
+    case 4: return "%.4f";
+    case 5: return "%.5f";
+    default: return "%.6f";
     }
-    return "%.3f";
 }
 
 } // namespace jst::tweaks

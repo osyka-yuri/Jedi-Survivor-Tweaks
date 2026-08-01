@@ -107,7 +107,7 @@ void StreamingPoolController::EnterAutoWaitingLocked() {
     m_enginePoolMb = 0;
     m_lastRejectedCandidate.reset();
     m_state = StreamingPoolState::WaitingForEngine;
-    PublishSafeHoldLocked();
+    PublishWaitingStateLocked();
 }
 
 void StreamingPoolController::PublishLockLocked(
@@ -133,8 +133,18 @@ bool StreamingPoolController::TryAdoptPathSampleLocked() {
     return true;
 }
 
-void StreamingPoolController::PublishSafeHoldLocked() {
-    if (m_lockedBytes == 0 || !IsPoolSizeWithinLimits(m_lockedBytes, m_policy.limits)) {
+void StreamingPoolController::PublishWaitingStateLocked() {
+    // Initial Auto startup remains open so the hook can observe the game's
+    // natural pool while CVar watches wait for the late settings barrier.
+    // Runtime mode changes retain the last valid lock instead of briefly
+    // reopening the streaming path.
+    if (m_lockedBytes == 0) {
+        m_effectiveGb = m_policy.limits.FallbackGb();
+        m_payload.StoreForced(0);
+        PublishPolicyLocked();
+        return;
+    }
+    if (!IsPoolSizeWithinLimits(m_lockedBytes, m_policy.limits)) {
         m_lockedBytes = m_policy.limits.fallbackBytes;
     }
     m_effectiveGb = PoolSizeBytesToGb(m_lockedBytes);
@@ -164,7 +174,7 @@ void StreamingPoolController::BindPayload(jst::core::StreamingPoolPayload& paylo
     }
 
     if (m_state == StreamingPoolState::WaitingForEngine) {
-        PublishSafeHoldLocked();
+        PublishWaitingStateLocked();
         return;
     }
 
@@ -194,7 +204,7 @@ bool StreamingPoolController::UpdatePolicy(PoolSizePolicy policy) {
         break;
     case StreamingPoolState::WaitingForEngine:
         m_lastRejectedCandidate.reset();
-        PublishSafeHoldLocked();
+        PublishWaitingStateLocked();
         break;
     case StreamingPoolState::LockedFromCVar:
     case StreamingPoolState::LockedFromPathSample:

@@ -8,6 +8,8 @@
 
 namespace jst::core {
 
+class DetourGate;
+
 // -----------------------------------------------------------------------------
 // Error model (used by HookEngine, instruction relocation, gateway, etc.)
 // -----------------------------------------------------------------------------
@@ -49,6 +51,12 @@ struct HookSiteSpec {
     std::string group;
     size_t minimumOverwriteLength = 5;
     HookContinuation continuation = HookContinuation::Resume;
+
+    // Optional process-lifetime gate for C++ detours that return normally and
+    // accept no more than the four register arguments of the Windows x64 ABI.
+    // The gateway calls the detour while admission is open and bypasses it via
+    // the original continuation after Close().
+    DetourGate* detourGate = nullptr;
 };
 
 // -----------------------------------------------------------------------------

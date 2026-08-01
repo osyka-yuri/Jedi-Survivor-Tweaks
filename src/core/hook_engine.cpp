@@ -1,5 +1,6 @@
 #include "hook_engine.hpp"
 
+#include "detour_gate.hpp"
 #include "gateway_allocator.hpp"
 #include "instruction_relocator.hpp"
 #include "hook_transaction.hpp"
@@ -20,6 +21,85 @@ namespace {
 
 constexpr size_t kRelativeJumpSize = 5;
 constexpr size_t kAbsoluteJumpSize = 14;
+
+void WriteGuardedReturningCall(
+    std::span<std::byte> destination,
+    uintptr_t gateState,
+    uintptr_t detour,
+    uintptr_t continuation) {
+    size_t cursor = 0;
+    const auto emitByte = [&](uint8_t value) {
+        destination[cursor++] = static_cast<std::byte>(value);
+    };
+    const auto emitBytes = [&](std::initializer_list<uint8_t> values) {
+        for (const uint8_t value : values) {
+            emitByte(value);
+        }
+    };
+    const auto emitAddress = [&](uintptr_t value) {
+        std::memcpy(destination.data() + cursor, &value, sizeof(value));
+        cursor += sizeof(value);
+    };
+    const auto emitMovRax = [&](uintptr_t value) {
+        emitBytes({0x48, 0xB8});
+        emitAddress(value);
+    };
+    const auto emitMovR11 = [&](uintptr_t value) {
+        emitBytes({0x49, 0xBB});
+        emitAddress(value);
+    };
+
+    // state bit 0 = admission, bits 1..31 = active calls in units of two.
+    // The cmpxchg either publishes activity while admission is still open or
+    // observes the closed state and bypasses DLL code entirely.
+    emitMovR11(gateState);
+    const size_t retryOffset = cursor;
+    emitBytes({0x41, 0x8B, 0x03});             // mov eax, [r11]
+    emitBytes({0xA8, 0x01});                   // test al, 1
+    emitByte(0x74);                            // je bypass
+    const size_t bypassDisplacement = cursor++;
+    emitBytes({0x44, 0x8D, 0x50, 0x02});       // lea r10d, [rax+2]
+    emitBytes({0xF0, 0x45, 0x0F, 0xB1, 0x13}); // lock cmpxchg [r11], r10d
+    emitByte(0x75);                            // jne retry
+    const size_t retryDisplacement = cursor++;
+
+    // This guarded mode is deliberately limited to returning void detours with
+    // at most four register arguments. The 0x28-byte frame provides shadow
+    // space and preserves Windows x64 stack alignment.
+    emitBytes({0x48, 0x83, 0xEC, 0x28});       // sub rsp, 28h
+    emitMovRax(detour);
+    emitBytes({0xFF, 0xD0});                   // call rax
+    emitBytes({0x48, 0x83, 0xC4, 0x28});       // add rsp, 28h
+
+    emitMovR11(gateState);
+    emitBytes({0xF0, 0x41, 0x83, 0x2B, 0x02}); // lock sub dword ptr [r11], 2
+    // With admission open the remaining state is at least 1. During shutdown
+    // only the last active detour reaches zero and needs to wake the waiter.
+    emitByte(0x75);                            // jne return
+    const size_t returnDisplacement = cursor++;
+    emitBytes({0x48, 0x83, 0xEC, 0x28});       // sub rsp, 28h
+    emitBytes({0x4C, 0x89, 0xD9});             // mov rcx, r11
+    emitMovRax(reinterpret_cast<uintptr_t>(&::WakeByAddressAll));
+    emitBytes({0xFF, 0xD0});                   // call rax
+    emitBytes({0x48, 0x83, 0xC4, 0x28});       // add rsp, 28h
+    const size_t returnOffset = cursor;
+    emitByte(0xC3);                            // ret
+
+    const size_t bypassOffset = cursor;
+    emitMovRax(continuation);
+    emitBytes({0xFF, 0xE0});                   // jmp rax
+
+    const auto patchRel8 = [&](size_t displacementOffset, size_t target) {
+        const ptrdiff_t displacement =
+            static_cast<ptrdiff_t>(target) -
+            static_cast<ptrdiff_t>(displacementOffset + 1);
+        destination[displacementOffset] = static_cast<std::byte>(
+            static_cast<uint8_t>(static_cast<int8_t>(displacement)));
+    };
+    patchRel8(bypassDisplacement, bypassOffset);
+    patchRel8(retryDisplacement, retryOffset);
+    patchRel8(returnDisplacement, returnOffset);
+}
 
 void LogSuspenderWarning(std::string_view operation) {
     JST_LOG_WARNING(
@@ -140,6 +220,15 @@ Hook::FinalizeTarget(uintptr_t moduleBase, uintptr_t moduleEnd) {
     }
     m_gateway = std::move(*gateway);
 
+    if (m_spec.detourGate &&
+        m_spec.continuation == HookContinuation::ReplayOriginal) {
+        auto continuationGateway = AllocateGateway(Name());
+        if (!continuationGateway) {
+            return std::unexpected(std::move(continuationGateway).error());
+        }
+        m_continuationGateway = std::move(*continuationGateway);
+    }
+
     auto displacement =
         detail::CalculateRel32(m_target + kRelativeJumpSize, m_gateway.Address(), Name());
     if (!displacement) {
@@ -161,12 +250,18 @@ uintptr_t Hook::ContinuationAddress() const noexcept {
     if (!IsResolved()) {
         return 0;
     }
-    return m_spec.continuation == HookContinuation::ReplayOriginal
-        ? m_gateway.Address() + kAbsoluteJumpSize
-        : m_resumeAddress;
+    if (m_spec.continuation == HookContinuation::Resume) {
+        return m_resumeAddress;
+    }
+    return m_spec.detourGate
+        ? m_continuationGateway.Address()
+        : m_gateway.Address() + kAbsoluteJumpSize;
 }
 
 std::expected<void, HookError> Hook::ValidatePrepare() {
+    if (m_prepared) {
+        return {};
+    }
     if (!IsResolved() || !m_gateway.Valid()) {
         return std::unexpected(MakeError(
             HookErrorCode::InvalidState,
@@ -174,13 +269,31 @@ std::expected<void, HookError> Hook::ValidatePrepare() {
             "Hook must be resolved before it can be prepared"));
     }
 
+    if (m_spec.detourGate && m_spec.detourGate->StateAddress() == 0) {
+        return std::unexpected(MakeError(
+            HookErrorCode::InvalidState,
+            Name(),
+            "Guarded detour gate must be opened before hook preparation"));
+    }
+
     if (m_spec.continuation == HookContinuation::ReplayOriginal) {
-        const size_t relocatedCapacity = m_gateway.Bytes().size() - 2 * kAbsoluteJumpSize;
+        if (m_spec.detourGate && !m_continuationGateway.Valid()) {
+            return std::unexpected(MakeError(
+                HookErrorCode::InvalidState,
+                Name(),
+                "Guarded replay hook is missing its continuation gateway"));
+        }
+        const size_t relocatedCapacity = m_spec.detourGate
+            ? m_continuationGateway.Bytes().size() - kAbsoluteJumpSize
+            : m_gateway.Bytes().size() - 2 * kAbsoluteJumpSize;
+        const uintptr_t relocatedAddress = m_spec.detourGate
+            ? m_continuationGateway.Address()
+            : m_gateway.Address() + kAbsoluteJumpSize;
         auto relocated = detail::RelocateInstructions(
             std::span<const std::byte>(reinterpret_cast<const std::byte*>(m_target),
                                        m_overwriteLength),
             m_target,
-            m_gateway.Address() + kAbsoluteJumpSize,
+            relocatedAddress,
             relocatedCapacity,
             Name());
         if (!relocated) {
@@ -228,28 +341,47 @@ std::expected<void, HookError> Hook::Prepare() {
 
     auto gateway = m_gateway.Bytes();
     std::fill(gateway.begin(), gateway.end(), std::byte{0xCC});
-    WriteAbsoluteJump(gateway.first(kAbsoluteJumpSize), m_detour);
 
     if (m_spec.continuation == HookContinuation::ReplayOriginal) {
+        auto continuationGateway = m_spec.detourGate
+            ? m_continuationGateway.Bytes()
+            : gateway.subspan(kAbsoluteJumpSize);
+        if (m_spec.detourGate) {
+            std::fill(
+                continuationGateway.begin(),
+                continuationGateway.end(),
+                std::byte{0xCC});
+        }
         const size_t relocatedCapacity =
-            gateway.size() - 2 * kAbsoluteJumpSize;
+            continuationGateway.size() - kAbsoluteJumpSize;
         auto relocated = detail::RelocateInstructions(
             std::span<const std::byte>(m_originalBytes.data(), m_originalBytesLength),
             m_target,
-            m_gateway.Address() + kAbsoluteJumpSize,
+            ContinuationAddress(),
             relocatedCapacity,
             Name());
         if (!relocated) {
             return std::unexpected(std::move(relocated).error());
         }
 
-        std::copy(relocated->begin(),
-                  relocated->end(),
-                  gateway.begin() + kAbsoluteJumpSize);
-        const size_t resumeJumpOffset = kAbsoluteJumpSize + relocated->size();
+        std::copy(
+            relocated->begin(),
+            relocated->end(),
+            continuationGateway.begin());
+        const size_t resumeJumpOffset = relocated->size();
         WriteAbsoluteJump(
-            gateway.subspan(resumeJumpOffset, kAbsoluteJumpSize),
+            continuationGateway.subspan(resumeJumpOffset, kAbsoluteJumpSize),
             m_resumeAddress);
+    }
+
+    if (m_spec.detourGate) {
+        WriteGuardedReturningCall(
+            gateway,
+            m_spec.detourGate->StateAddress(),
+            m_detour,
+            ContinuationAddress());
+    } else {
+        WriteAbsoluteJump(gateway.first(kAbsoluteJumpSize), m_detour);
     }
 
     m_prepared = true;
@@ -569,17 +701,22 @@ HookEngine::GetContinuationAddress(std::string_view name) const {
     return address != 0 ? std::optional{address} : std::nullopt;
 }
 
-void HookEngine::UnregisterHook(std::string_view name) {
+std::expected<void, HookError>
+HookEngine::UnregisterHook(std::string_view name) {
     auto it = m_hooks.find(name);
     if (it == m_hooks.end()) {
-        return;
+        return {};
     }
 
     ThreadSuspender suspender;
     if (it->second.IsInstalled() || it->second.NeedsInstallRollback()) {
-        (void)it->second.Uninstall();
+        auto removed = it->second.Uninstall();
+        if (!removed) {
+            return removed;
+        }
     }
     m_hooks.erase(it);
+    return {};
 }
 
 } // namespace jst::core

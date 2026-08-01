@@ -30,8 +30,7 @@ foreach ($slot in $slots) {
 
 $content = $builder.ToString().TrimEnd() + [Environment]::NewLine
 
-# If another project's pre-build step already wrote the same content,
-# we can skip the write entirely and avoid the lock contention.
+# Preserve the file timestamp when the generated content is already current.
 $skipWrite = $false
 if (Test-Path -LiteralPath $Output) {
     try {
@@ -45,21 +44,7 @@ if (Test-Path -LiteralPath $Output) {
 }
 
 if (-not $skipWrite) {
-    $maxAttempts = 3
-    $attempt = 0
-    $written = $false
-    while (-not $written -and $attempt -lt $maxAttempts) {
-        ++$attempt
-        try {
-            Set-Content -Path $Output -Value $content -NoNewline -Encoding ASCII
-            $written = $true
-        } catch {
-            if ($attempt -eq $maxAttempts) {
-                throw
-            }
-            Start-Sleep -Milliseconds 200
-        }
-    }
+    Set-Content -Path $Output -Value $content -NoNewline -Encoding ASCII
 }
 
 Write-Host "Generated $Output with $($slots.Count) slot(s)."

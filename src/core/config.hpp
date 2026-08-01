@@ -47,6 +47,12 @@ public:
     [[nodiscard]] std::string GetString(std::string_view section, std::string_view key, std::string_view defaultValue) const;
     [[nodiscard]] int         GetInt(std::string_view section, std::string_view key, int defaultValue) const;
     [[nodiscard]] float       GetFloat(std::string_view section, std::string_view key, float defaultValue) const;
+    [[nodiscard]] float       GetFloatInRange(
+        std::string_view section,
+        std::string_view key,
+        float defaultValue,
+        float minimum,
+        float maximum) const;
     [[nodiscard]] bool        GetBool(std::string_view section, std::string_view key, bool defaultValue) const;
 
     [[nodiscard]] bool HasSection(std::string_view section) const;

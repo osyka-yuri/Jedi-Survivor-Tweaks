@@ -1,96 +1,137 @@
 #include "tweak_manager.hpp"
+
 #include "core/config.hpp"
 #include "core/hook_engine.hpp"
-#include "core/logging.hpp"
-
-#include <format>
 
 namespace jst::tweaks {
 
-std::expected<size_t, std::string> TweakManager::Initialize(core::HookEngine& hooks, core::Config& config) {
-    if (m_initialized) return 0;
+std::expected<void, std::string> TweakManager::Prepare(
+    core::HookEngine& hooks,
+    const core::Config& config) {
+    if (m_started) {
+        return std::unexpected("TweakManager has already started");
+    }
+    m_started = true;
 
-    // Step 1: register-only initialization. For hook tweaks this just hands
-    // patterns to the engine without scanning .text. CVar-only tweaks fully
-    // initialize here.
-    std::vector<ITweak*> activeTweaks;
-    activeTweaks.reserve(m_tweaks.size());
-    for (auto& tweak : m_tweaks) {
-        const std::string_view tweakName = tweak->Name();
-        const bool enabled = config.GetBool(tweakName, "Enabled", tweak->IsEnabledByDefault());
-        if (!enabled) {
-            JST_LOG_INFO("Tweak '{}' is disabled in config.", tweakName);
+    for (auto& entry : m_entries) {
+        auto configured = entry.tweak->Configure(config);
+        if (!configured) {
+            entry.status = TweakStatus{
+                .stage = TweakStage::Failed,
+                .error = configured.error(),
+            };
+            JST_LOG_ERROR(
+                "Failed to configure tweak '{}': {}.",
+                entry.tweak->Name(),
+                configured.error());
             continue;
         }
-        JST_LOG_INFO("Initializing tweak: '{}'.", tweakName);
 
-        auto initRes = tweak->Initialize(hooks, config);
-        if (!initRes) {
-            JST_LOG_ERROR("Failed to initialize tweak: '{}'. Error: '{}'.", tweakName, initRes.error());
+        if (!configured->enabled &&
+            entry.tweak->ActivationMode() ==
+                TweakActivationMode::LaunchGated) {
+            entry.status.stage = TweakStage::Disabled;
+            JST_LOG_INFO(
+                "Tweak '{}' is disabled in config.",
+                entry.tweak->Name());
             continue;
         }
-        activeTweaks.push_back(tweak.get());
-    }
 
-    // Step 2: single-pass batch scan resolves every pending pattern hook.
-    for (const auto& error : hooks.ResolveAll()) {
-        JST_LOG_ERROR("Hook resolve failure [{}]: {}", error.site, error.message);
-    }
-
-    // Step 3: hand continuation addresses to each still-active tweak. A
-    // multi-site tweak unregisters its entire group if any binding is missing.
-    std::vector<ITweak*> resolvedTweaks;
-    resolvedTweaks.reserve(activeTweaks.size());
-    for (auto* tweak : activeTweaks) {
-        auto finRes = tweak->FinalizeResolution(hooks);
-        if (!finRes) {
-            JST_LOG_ERROR("Failed to finalize tweak: '{}'. Error: '{}'.",
-                          tweak->Name(), finRes.error());
+        auto prepared = entry.tweak->Prepare(hooks);
+        if (!prepared) {
+            entry.status = TweakStatus{
+                .stage = TweakStage::Failed,
+                .error = prepared.error(),
+            };
+            JST_LOG_ERROR(
+                "Failed to prepare tweak '{}': {}.",
+                entry.tweak->Name(),
+                prepared.error());
             continue;
         }
-        resolvedTweaks.push_back(tweak);
+        entry.prepared = true;
+        entry.status.stage = TweakStage::Prepared;
     }
-
-    // Step 4: prepare every gateway, seal the arena, then install each public
-    // hook group transactionally while other process threads are suspended.
-    for (const auto& error : hooks.InstallAll()) {
-        JST_LOG_ERROR("Hook install failure [{}]: {}", error.site, error.message);
-    }
-
-    // Step 5: publish only fully installed groups to the overlay/runtime state.
-    size_t enabledCount = 0;
-    for (auto* tweak : resolvedTweaks) {
-        auto installed = tweak->FinalizeInstallation(hooks);
-        if (!installed) {
-            JST_LOG_ERROR("Failed to publish tweak '{}'. Error: '{}'.",
-                          tweak->Name(), installed.error());
-            continue;
-        }
-        ++enabledCount;
-    }
-
-    m_initialized = true;
-    JST_LOG_INFO("Initialized. Active tweaks: {}/{}.",
-                 enabledCount, m_tweaks.size());
-    return enabledCount;
+    return {};
 }
 
-void TweakManager::IterateTweaks(std::function<void(ITweak&)> visitor) const {
-    for (const auto& tweak : m_tweaks) {
-        visitor(*tweak);
+void TweakManager::FinalizeResolution(core::HookEngine& hooks) {
+    for (auto& entry : m_entries) {
+        if (entry.status.stage != TweakStage::Prepared) {
+            continue;
+        }
+        auto finalized = entry.tweak->FinalizeResolution(hooks);
+        if (!finalized) {
+            entry.status = TweakStatus{
+                .stage = TweakStage::Failed,
+                .error = finalized.error(),
+            };
+            JST_LOG_ERROR(
+                "Failed to finalize tweak resolution '{}': {}.",
+                entry.tweak->Name(),
+                finalized.error());
+            continue;
+        }
+        entry.status.stage = TweakStage::Resolved;
+    }
+}
+
+size_t TweakManager::FinalizeInstallation(core::HookEngine& hooks) {
+    size_t activeCount = 0;
+    for (auto& entry : m_entries) {
+        if (entry.status.stage != TweakStage::Resolved) {
+            continue;
+        }
+        auto finalized = entry.tweak->FinalizeInstallation(hooks);
+        if (!finalized) {
+            entry.status = TweakStatus{
+                .stage = TweakStage::Failed,
+                .error = finalized.error(),
+            };
+            JST_LOG_ERROR(
+                "Failed to publish tweak '{}': {}.",
+                entry.tweak->Name(),
+                finalized.error());
+            continue;
+        }
+        entry.status.stage = TweakStage::Active;
+        ++activeCount;
+    }
+
+    JST_LOG_INFO(
+        "Initialized. Active tweaks: {}/{}.",
+        activeCount,
+        m_entries.size());
+    return activeCount;
+}
+
+void TweakManager::IterateTweaks(
+    const std::function<void(ITweak&, const TweakStatus&)>& visitor) {
+    for (auto& entry : m_entries) {
+        visitor(*entry.tweak, entry.status);
+    }
+}
+
+void TweakManager::IterateTweaks(
+    const std::function<void(const ITweak&, const TweakStatus&)>& visitor)
+    const {
+    for (const auto& entry : m_entries) {
+        visitor(*entry.tweak, entry.status);
     }
 }
 
 void TweakManager::Shutdown() {
-    if (!m_initialized) return;
-
-    for (auto it = m_tweaks.rbegin(); it != m_tweaks.rend(); ++it) {
-        if ((*it)->IsInitialized()) {
-            (*it)->Shutdown();
+    if (!m_started) {
+        return;
+    }
+    for (auto it = m_entries.rbegin(); it != m_entries.rend(); ++it) {
+        if (it->prepared) {
+            it->tweak->Shutdown();
+            it->prepared = false;
         }
     }
-    m_tweaks.clear();
-    m_initialized = false;
+    m_entries.clear();
+    m_started = false;
 }
 
 } // namespace jst::tweaks

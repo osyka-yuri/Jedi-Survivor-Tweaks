@@ -35,8 +35,9 @@ bool ResetControlToDefault(RuntimeControl& control, jst::core::Config& config) {
     return std::visit([&](auto& value) -> bool {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_same_v<T, SliderFloatControl>) {
-            if (!TryCommitSliderEdit(
-                    value, value.spec.defaultValue, value.current)) {
+            const auto result = TryCommitSliderEdit(
+                value, value.spec.defaultValue, value.current);
+            if (!result.ShouldPersist()) {
                 return false;
             }
             PersistControl(control, config);
@@ -45,8 +46,13 @@ bool ResetControlToDefault(RuntimeControl& control, jst::core::Config& config) {
             if (value.current == value.defaultValue) {
                 return false;
             }
+            const bool previous = value.current;
+            const auto result = value.apply(value.defaultValue);
+            if (!result.ShouldPersist()) {
+                value.current = previous;
+                return false;
+            }
             value.current = value.defaultValue;
-            value.apply(value.current);
             PersistControl(control, config);
             return true;
         } else {

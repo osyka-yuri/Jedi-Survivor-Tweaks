@@ -1,6 +1,7 @@
 #pragma once
 
-#include "pe_utils.hpp"
+#include "cvar_layout.hpp"
+#include "pe_types.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -13,15 +14,15 @@ struct ScanEntry;
 
 // The resolved write targets for a single CVar.
 struct ResolvedCVar {
-    uintptr_t writeAddr = 0;
-    uintptr_t writeAddrShadow = 0;
     uintptr_t cvarObject = 0;
+    uintptr_t stringSetter = 0;
+    CVarReadLayout readLayout{};
 };
 
-// Attempts to resolve a CVar via an explicit override (e.g., specific build signatures).
-[[nodiscard]] std::optional<ResolvedCVar> ResolveFromOverride(
-    const CVarOverride* override,
-    const ModuleInfo& mod);
+[[nodiscard]] bool ValidateResolvedCVar(
+    const ResolvedCVar& resolved) noexcept;
+[[nodiscard]] uintptr_t ResolveCVarReadAddress(
+    const ResolvedCVar& resolved) noexcept;
 
 // Attempts to resolve a CVar from dynamic scan results (.rdata string references).
 [[nodiscard]] std::optional<ResolvedCVar> ResolveFromScan(

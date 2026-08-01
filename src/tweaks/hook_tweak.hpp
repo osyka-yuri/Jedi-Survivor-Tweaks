@@ -79,15 +79,16 @@ public:
     HookTweak(HookTweak&&) = delete;
     HookTweak& operator=(HookTweak&&) = delete;
 
+    [[nodiscard]] std::expected<TweakActivation, std::string>
+    Configure(const jst::core::Config& config) override;
     [[nodiscard]] std::expected<void, std::string>
-    Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) override;
+    Prepare(jst::core::HookEngine& hooks) override;
     [[nodiscard]] std::expected<void, std::string>
     FinalizeResolution(jst::core::HookEngine& hooks) override;
     [[nodiscard]] std::expected<void, std::string>
     FinalizeInstallation(jst::core::HookEngine& hooks) override;
     void Shutdown() override;
 
-    [[nodiscard]] bool IsInitialized() const override { return m_initialized; }
     [[nodiscard]] std::string_view Name() const noexcept override { return m_name; }
     [[nodiscard]] std::string_view Description() const noexcept override { return m_description; }
     [[nodiscard]] bool IsEnabledByDefault() const noexcept override { return m_enabledByDefault; }
@@ -96,7 +97,7 @@ public:
         jst::core::Config& config) override;
 
 protected:
-    virtual void OnConfigLoaded(jst::core::Config& /*config*/) {}
+    virtual void OnConfigLoaded(const jst::core::Config& /*config*/) {}
     virtual void OnRuntimeFloatChanged(float /*value*/) {}
 
     [[nodiscard]] jst::hooks::Context& PrimaryContext() const {
@@ -105,9 +106,11 @@ protected:
 
     void ApplyMultiplier(float multiplier);
     [[nodiscard]] float LoadedMultiplier() const noexcept { return m_loadedMultiplier; }
+    [[nodiscard]] bool IsEffectActive() const noexcept { return m_effectActive; }
 
 private:
-    void UnregisterBindings(jst::core::HookEngine& hooks);
+    [[nodiscard]] std::string UnregisterBindings(
+        jst::core::HookEngine& hooks);
 
     std::string m_name;
     std::string m_description;
@@ -116,8 +119,7 @@ private:
     float m_loadedMultiplier = 0.0f;
     bool m_overlayEnabledPref = false;
     bool m_enabledByDefault = false;
-    bool m_resolutionFinalized = false;
-    bool m_initialized = false;
+    bool m_effectActive = false;
 };
 
 } // namespace jst::tweaks

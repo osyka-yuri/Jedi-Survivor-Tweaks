@@ -61,6 +61,16 @@ public:
         return service.m_completedProbeId == id;
     }
 
+    [[nodiscard]] static bool WaitForCompletedProbe(
+        GraphicsAdapterService& service,
+        GraphicsAdapterId id,
+        std::chrono::milliseconds timeout) {
+        std::unique_lock lock(service.m_mutex);
+        return service.m_probeCv.wait_for(lock, timeout, [&] {
+            return service.m_completedProbeId == id;
+        });
+    }
+
     [[nodiscard]] static GraphicsAdapterSnapshot Classify(
         GraphicsAdapterId id, uint64_t dedicatedBytes, bool software) noexcept {
         return GraphicsAdapterService::ClassifyAdapter(id, dedicatedBytes, software);

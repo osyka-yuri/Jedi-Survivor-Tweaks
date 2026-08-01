@@ -11,7 +11,9 @@ void TextSv(std::string_view text);
 void TextDisabledSv(std::string_view text);
 [[nodiscard]] float ComputeLabelWidth(
     const std::vector<jst::tweaks::RuntimeControl>& controls);
-[[nodiscard]] bool RenderControl(jst::tweaks::RuntimeControl& control, float labelWidth);
+[[nodiscard]] jst::tweaks::RuntimeEditResult RenderControl(
+    jst::tweaks::RuntimeControl& control,
+    float labelWidth);
 void ShowTooltipIfAny(std::string_view text);
 
 } // namespace jst::overlay

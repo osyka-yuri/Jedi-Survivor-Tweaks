@@ -27,8 +27,16 @@ inline constexpr FloatSliderSpec kSharpenSliderSpec{
     .step = kSliderStepTenth,
 };
 
+inline constexpr FloatSliderSpec kMaxFPSSliderSpec{
+    .min = 0.0f,
+    .max = 300.0f,
+    .defaultValue = 60.0f,
+    .step = 1.0f,
+};
+
 static_assert(IsValidSpec(kMultiplierSliderSpec));
 static_assert(IsValidSpec(kAspectRatioSliderSpec));
 static_assert(IsValidSpec(kSharpenSliderSpec));
+static_assert(IsValidSpec(kMaxFPSSliderSpec));
 
 } // namespace jst::tweaks

@@ -2,13 +2,142 @@
 #include "ini_helpers.hpp"
 #include "logging.hpp"
 
+#include <windows.h>
+
+#include <atomic>
 #include <charconv>
+#include <cmath>
 #include <format>
 #include <fstream>
 #include <map>
 #include <set>
 
 namespace jst::core {
+
+namespace {
+
+class TempFileGuard final {
+public:
+    explicit TempFileGuard(std::filesystem::path path)
+        : m_path(std::move(path)) {}
+    ~TempFileGuard() {
+        if (!m_path.empty()) {
+            std::error_code ignored;
+            std::filesystem::remove(m_path, ignored);
+        }
+    }
+
+    TempFileGuard(const TempFileGuard&) = delete;
+    TempFileGuard& operator=(const TempFileGuard&) = delete;
+    TempFileGuard(TempFileGuard&& other) noexcept
+        : m_path(std::move(other.m_path)) {
+        other.m_path.clear();
+    }
+    TempFileGuard& operator=(TempFileGuard&&) = delete;
+
+    [[nodiscard]] const std::filesystem::path& Path() const noexcept {
+        return m_path;
+    }
+    void Release() noexcept { m_path.clear(); }
+
+private:
+    std::filesystem::path m_path;
+};
+
+[[nodiscard]] std::optional<TempFileGuard> CreateSiblingTemp(
+    const std::filesystem::path& target) {
+    static std::atomic<uint64_t> sequence{0};
+    for (size_t attempt = 0; attempt < 32; ++attempt) {
+        const uint64_t id = sequence.fetch_add(1, std::memory_order_relaxed);
+        auto candidate = target.parent_path() /
+            (target.filename().wstring() + L"." +
+             std::to_wstring(GetCurrentProcessId()) + L"." +
+             std::to_wstring(GetTickCount64()) + L"." +
+             std::to_wstring(id) + L".tmp");
+        const HANDLE file = CreateFileW(
+            candidate.c_str(),
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            CloseHandle(file);
+            return TempFileGuard(std::move(candidate));
+        }
+        if (GetLastError() != ERROR_FILE_EXISTS &&
+            GetLastError() != ERROR_ALREADY_EXISTS) {
+            break;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool FlushFileToDisk(const std::filesystem::path& path) {
+    const HANDLE file = CreateFileW(
+        path.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        JST_LOG_ERROR(
+            "Config::Save: cannot reopen temp file '{}' for durable flush "
+            "(Win32 error {}).",
+            path.string(),
+            GetLastError());
+        return false;
+    }
+
+    const BOOL flushed = FlushFileBuffers(file);
+    const DWORD flushError = flushed ? ERROR_SUCCESS : GetLastError();
+    const BOOL closed = CloseHandle(file);
+    const DWORD closeError = closed ? ERROR_SUCCESS : GetLastError();
+    if (!flushed || !closed) {
+        JST_LOG_ERROR(
+            "Config::Save: durable flush failed for '{}' "
+            "(flush error {}, close error {}).",
+            path.string(),
+            flushError,
+            closeError);
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] std::optional<bool> PathExists(
+    const std::filesystem::path& path,
+    DWORD& error) noexcept {
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        error = ERROR_SUCCESS;
+        return true;
+    }
+    error = GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+        return false;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool MoveReplacing(
+    const std::filesystem::path& source,
+    const std::filesystem::path& target,
+    DWORD& error) noexcept {
+    if (MoveFileExW(
+            source.c_str(),
+            target.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        error = ERROR_SUCCESS;
+        return true;
+    }
+    error = GetLastError();
+    return false;
+}
+
+} // namespace
 
 using jst::core::detail::Trim;
 using jst::core::detail::MatchesAny;
@@ -88,24 +217,62 @@ std::string Config::GetString(std::string_view section, std::string_view key, st
 int Config::GetInt(std::string_view section, std::string_view key, int defaultValue) const {
     const auto raw = GetRawOpt(section, key);
     if (!raw) return defaultValue;
+    const auto valueText = Trim(*raw);
     int value = 0;
-    auto [ptr, ec] = std::from_chars(raw->data(), raw->data() + raw->size(), value);
-    return ec == std::errc{} ? value : defaultValue;
+    const auto [end, error] = std::from_chars(
+        valueText.data(), valueText.data() + valueText.size(), value);
+    if (error == std::errc{} && end == valueText.data() + valueText.size()) {
+        return value;
+    }
+    JST_LOG_WARNING(
+        "Invalid integer [{}] {}='{}'; using default {}.",
+        section, key, *raw, defaultValue);
+    return defaultValue;
 }
 
 float Config::GetFloat(std::string_view section, std::string_view key, float defaultValue) const {
     const auto raw = GetRawOpt(section, key);
     if (!raw) return defaultValue;
+    const auto valueText = Trim(*raw);
     float value = 0.0f;
-    auto [ptr, ec] = std::from_chars(raw->data(), raw->data() + raw->size(), value);
-    return ec == std::errc{} ? value : defaultValue;
+    const auto [end, error] = std::from_chars(
+        valueText.data(), valueText.data() + valueText.size(), value);
+    if (error == std::errc{} &&
+        end == valueText.data() + valueText.size() &&
+        std::isfinite(value)) {
+        return value;
+    }
+    JST_LOG_WARNING(
+        "Invalid finite number [{}] {}='{}'; using default {}.",
+        section, key, *raw, defaultValue);
+    return defaultValue;
+}
+
+float Config::GetFloatInRange(
+    std::string_view section,
+    std::string_view key,
+    float defaultValue,
+    float minimum,
+    float maximum) const {
+    const float value = GetFloat(section, key, defaultValue);
+    if (value >= minimum && value <= maximum) {
+        return value;
+    }
+    JST_LOG_WARNING(
+        "Out-of-range number [{}] {}={} (expected {}..{}); using default {}.",
+        section, key, value, minimum, maximum, defaultValue);
+    return defaultValue;
 }
 
 bool Config::GetBool(std::string_view section, std::string_view key, bool defaultValue) const {
     const auto raw = GetRawOpt(section, key);
     if (!raw) return defaultValue;
-    if (detail::MatchesAny(*raw, detail::kFalseLiterals)) return false;
-    if (detail::MatchesAny(*raw, detail::kTrueLiterals))  return true;
+    const auto valueText = Trim(*raw);
+    if (detail::MatchesAny(valueText, detail::kFalseLiterals)) return false;
+    if (detail::MatchesAny(valueText, detail::kTrueLiterals))  return true;
+    JST_LOG_WARNING(
+        "Invalid boolean [{}] {}='{}'; using default {}.",
+        section, key, *raw, defaultValue);
     return defaultValue;
 }
 
@@ -137,26 +304,178 @@ void Config::SetBool(std::string_view section, std::string_view key, bool value)
 bool Config::Save() {
     if (m_path.empty()) return false;
 
-    const auto tmpPath = m_path.parent_path() / (m_path.filename().string() + ".tmp");
+    auto temp = CreateSiblingTemp(m_path);
+    if (!temp) {
+        JST_LOG_ERROR(
+            "Config::Save: cannot create a unique sibling temp for '{}'.",
+            m_path.string());
+        return false;
+    }
+    const auto tmpPath = temp->Path();
     const bool wrote = (m_saveMode == SaveMode::PreserveComments)
                            ? SavePreserveComments(tmpPath)
                            : SaveDeterministic(tmpPath);
     if (!wrote) {
-        std::error_code rmEc;
-        std::filesystem::remove(tmpPath, rmEc);  // best-effort orphan cleanup
+        return false;
+    }
+    if (!FlushFileToDisk(tmpPath)) {
         return false;
     }
 
-    std::error_code ec;
-    std::filesystem::rename(tmpPath, m_path, ec);
-    if (ec) {
-        JST_LOG_ERROR("Config::Save: rename failed: {}.", ec.message());
-        std::error_code rmEc;
-        std::filesystem::remove(tmpPath, rmEc);
+    DWORD targetInspectError = ERROR_SUCCESS;
+    const auto targetExists = PathExists(m_path, targetInspectError);
+    if (!targetExists) {
+        temp->Release();
+        JST_LOG_ERROR(
+            "Config::Save: cannot inspect '{}' (Win32 error {}). The flushed "
+            "replacement was preserved at '{}'.",
+            m_path.string(),
+            targetInspectError,
+            tmpPath.string());
         return false;
     }
-    JST_LOG_INFO("Config saved: '{}'.", m_path.string());
-    return true;
+
+    if (!*targetExists) {
+        DWORD moveError = ERROR_SUCCESS;
+        if (!MoveReplacing(tmpPath, m_path, moveError)) {
+            temp->Release();
+            JST_LOG_ERROR(
+                "Config::Save: atomic MoveFileExW failed for '{}' "
+                "(Win32 error {}). The flushed replacement was preserved "
+                "at '{}'.",
+                m_path.string(),
+                moveError,
+                tmpPath.string());
+            return false;
+        }
+        temp->Release();
+        JST_LOG_INFO("Config saved: '{}'.", m_path.string());
+        return true;
+    }
+
+    // ReplaceFileW may partially rename its operands even when it reports an
+    // error. Supplying a known backup path gives us a deterministic copy of
+    // the original that can be restored before any recovery artifact is
+    // removed. The replacement itself was flushed above; the documented
+    // REPLACEFILE_WRITE_THROUGH flag is unsupported and is deliberately not
+    // used.
+    const auto backupPath = std::filesystem::path(
+        tmpPath.wstring() + L".backup");
+    DWORD backupInspectError = ERROR_SUCCESS;
+    const auto backupExistsBefore = PathExists(backupPath, backupInspectError);
+    if (!backupExistsBefore || *backupExistsBefore) {
+        JST_LOG_ERROR(
+            "Config::Save: backup path '{}' is not available "
+            "(Win32 error {}).",
+            backupPath.string(),
+            backupInspectError);
+        return false;
+    }
+    TempFileGuard backup(backupPath);
+
+    if (ReplaceFileW(
+            m_path.c_str(),
+            tmpPath.c_str(),
+            backupPath.c_str(),
+            0,
+            nullptr,
+            nullptr)) {
+        temp->Release();
+        JST_LOG_INFO("Config saved: '{}'.", m_path.string());
+        return true;
+    }
+
+    const DWORD replaceError = GetLastError();
+    DWORD backupError = ERROR_SUCCESS;
+    DWORD targetError = ERROR_SUCCESS;
+    DWORD tempError = ERROR_SUCCESS;
+    const auto backupExists = PathExists(backupPath, backupError);
+    const auto targetExistsAfter = PathExists(m_path, targetError);
+    const auto tempExistsAfter = PathExists(tmpPath, tempError);
+    if (!backupExists || !targetExistsAfter || !tempExistsAfter) {
+        // The filesystem outcome cannot be classified safely. Retain every
+        // possible recovery artifact instead of letting RAII erase evidence or
+        // the only surviving copy.
+        backup.Release();
+        temp->Release();
+        JST_LOG_ERROR(
+            "Config::Save: ReplaceFileW failed for '{}' (Win32 error {}) and "
+            "recovery state is ambiguous (backup {}, target {}, temp {}). "
+            "Artifacts were preserved at '{}' and '{}'.",
+            m_path.string(),
+            replaceError,
+            backupError,
+            targetError,
+            tempError,
+            backupPath.string(),
+            tmpPath.string());
+        return false;
+    }
+
+    if (*backupExists) {
+        DWORD restoreError = ERROR_SUCCESS;
+        if (MoveReplacing(backupPath, m_path, restoreError)) {
+            JST_LOG_ERROR(
+                "Config::Save: ReplaceFileW failed for '{}' (Win32 error {}); "
+                "the original file was restored from backup.",
+                m_path.string(),
+                replaceError);
+            return false;
+        }
+
+        backup.Release();
+        temp->Release();
+        JST_LOG_ERROR(
+            "Config::Save: ReplaceFileW failed for '{}' (Win32 error {}) and "
+            "the original backup could not be restored (Win32 error {}). "
+            "Recovery artifacts were preserved at '{}' and '{}'.",
+            m_path.string(),
+            replaceError,
+            restoreError,
+            backupPath.string(),
+            tmpPath.string());
+        return false;
+    }
+
+    if (*targetExistsAfter) {
+        JST_LOG_ERROR(
+            "Config::Save: ReplaceFileW failed for '{}' (Win32 error {}); "
+            "the existing target remains intact.",
+            m_path.string(),
+            replaceError);
+        return false;
+    }
+
+    if (*tempExistsAfter) {
+        DWORD recoveryError = ERROR_SUCCESS;
+        if (MoveReplacing(tmpPath, m_path, recoveryError)) {
+            temp->Release();
+            JST_LOG_WARNING(
+                "Config::Save: ReplaceFileW failed for '{}' (Win32 error {}), "
+                "but the flushed replacement was recovered successfully.",
+                m_path.string(),
+                replaceError);
+            return true;
+        }
+
+        temp->Release();
+        JST_LOG_ERROR(
+            "Config::Save: ReplaceFileW failed for '{}' (Win32 error {}) and "
+            "the replacement could not be recovered (Win32 error {}). "
+            "The flushed temp file was preserved at '{}'.",
+            m_path.string(),
+            replaceError,
+            recoveryError,
+            tmpPath.string());
+        return false;
+    }
+
+    JST_LOG_ERROR(
+        "Config::Save: ReplaceFileW failed for '{}' (Win32 error {}) and no "
+        "recoverable filesystem object remains.",
+        m_path.string(),
+        replaceError);
+    return false;
 }
 
 bool Config::SavePreserveComments(const std::filesystem::path& tmpPath) const {
@@ -270,8 +589,14 @@ bool Config::SavePreserveComments(const std::filesystem::path& tmpPath) const {
     for (const auto& ln : output) {
         out << ln << '\n';
     }
+    out.flush();
     if (!out) {
         JST_LOG_ERROR("Config::Save: write error on '{}'.", tmpPath.string());
+        return false;
+    }
+    out.close();
+    if (!out) {
+        JST_LOG_ERROR("Config::Save: close error on '{}'.", tmpPath.string());
         return false;
     }
     return true;
@@ -290,8 +615,14 @@ bool Config::SaveDeterministic(const std::filesystem::path& tmpPath) const {
         }
         out << '\n';
     }
+    out.flush();
     if (!out) {
         JST_LOG_ERROR("Config::Save: write error on '{}'.", tmpPath.string());
+        return false;
+    }
+    out.close();
+    if (!out) {
+        JST_LOG_ERROR("Config::Save: close error on '{}'.", tmpPath.string());
         return false;
     }
     return true;

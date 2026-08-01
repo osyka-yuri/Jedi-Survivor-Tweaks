@@ -1,7 +1,6 @@
 #include "main_app.hpp"
 
 #include "core/logging.hpp"
-#include "core/cvar_system.hpp"
 #include "core/graphics_adapter_service.hpp"
 #include "tweaks/letterbox_pillarbox_fix.hpp"
 #include "tweaks/gameplay_fov.hpp"
@@ -9,6 +8,7 @@
 #include "tweaks/aspect_ratio_ui_fix.hpp"
 #include "tweaks/graphical_tweaks.hpp"
 #include "tweaks/interpolated_rendering.hpp"
+#include "tweaks/max_fps.hpp"
 #include "tweaks/custom_cvars.hpp"
 #include "tweaks/streaming_pool_fix.hpp"
 
@@ -72,34 +72,47 @@ Application::Application(const fs::path& baseDir, LoaderVariant variant)
         jst::core::ParseLogLevel(minLevelStr, jst::core::LogLevel::Info));
 
     jst::core::GraphicsAdapterService::Instance().Start();
-    jst::core::CVarSystem::Instance().StartPump();
+    m_cvarRuntime.Start(m_hookEngine);
 
-    m_tweakManager.RegisterTweak<jst::tweaks::LetterboxPillarboxFix>();
-    m_tweakManager.RegisterTweak<jst::tweaks::GameplayFOV>();
-    m_tweakManager.RegisterTweak<jst::tweaks::CameraDistance>();
-    m_tweakManager.RegisterTweak<jst::tweaks::AspectRatioUIFix>();
-    m_tweakManager.RegisterTweak<jst::tweaks::GraphicalTweaks>();
-    m_tweakManager.RegisterTweak<jst::tweaks::InterpolatedRenderingTweak>();
-    m_tweakManager.RegisterTweak<jst::tweaks::CustomCVarsTweak>();
-    m_tweakManager.RegisterTweak<jst::tweaks::StreamingPoolFix>();
+    (void)m_tweakManager.RegisterTweak<jst::tweaks::LetterboxPillarboxFix>();
+    (void)m_tweakManager.RegisterTweak<jst::tweaks::GameplayFOV>();
+    (void)m_tweakManager.RegisterTweak<jst::tweaks::CameraDistance>();
+    (void)m_tweakManager.RegisterTweak<jst::tweaks::AspectRatioUIFix>();
+    (void)m_tweakManager.RegisterTweak<jst::tweaks::GraphicalTweaks>();
+    (void)m_tweakManager.RegisterTweak<jst::tweaks::InterpolatedRenderingTweak>();
+    (void)m_tweakManager.RegisterTweak<jst::tweaks::MaxFPSTweak>();
+    (void)m_tweakManager.RegisterTweak<jst::tweaks::StreamingPoolFix>();
+    (void)m_tweakManager.RegisterTweak<jst::tweaks::CustomCVarsTweak>();
 
-    auto initRes = m_tweakManager.Initialize(m_hookEngine, m_config);
-    if (!initRes) {
-        JST_LOG_ERROR("Failed to initialize TweakManager: '{}'.", initRes.error());
+    auto prepared = m_tweakManager.Prepare(m_hookEngine, m_config);
+    if (!prepared) {
+        JST_LOG_ERROR("Failed to prepare TweakManager: '{}'.", prepared.error());
         return;
     }
+
+    for (const auto& error : m_hookEngine.ResolveAll()) {
+        JST_LOG_ERROR("Hook resolve failure [{}]: {}", error.site, error.message);
+    }
+
+    m_cvarRuntime.FinalizeResolution(m_hookEngine);
+    m_tweakManager.FinalizeResolution(m_hookEngine);
+
+    for (const auto& error : m_hookEngine.InstallAll()) {
+        JST_LOG_ERROR("Hook install failure [{}]: {}", error.site, error.message);
+    }
+
+    m_cvarRuntime.FinalizeInstallation(m_hookEngine);
+    (void)m_tweakManager.FinalizeInstallation(m_hookEngine);
 
     m_ok = true;
 }
 
 Application::~Application() {
     g_runningApp.store(nullptr, std::memory_order_release);
-    // Watch callbacks run on the CVar pump thread and may touch tweaks.
-    // Join both background services while tweak owners are still alive, then
-    // tear down their subscriptions and hooks.
-    jst::core::CVarSystem::Instance().StopPump();
+    m_cvarRuntime.BeginShutdown();
     jst::core::GraphicsAdapterService::Instance().Stop();
     m_tweakManager.Shutdown();
+    m_cvarRuntime.Shutdown(m_hookEngine);
     m_hookEngine.Shutdown();
     jst::core::Logger::Instance().Shutdown();
 }
@@ -125,29 +138,29 @@ void BootstrapAsync(HMODULE hModule, LoaderVariant variant) {
     // failure below we clear the flag so a retry path remains open.
     if (g_bootstrapStarted.test_and_set(std::memory_order_acq_rel)) return;
 
-    auto* args = new BootstrapArgs{hModule, variant};
+    auto args = std::make_unique<BootstrapArgs>(BootstrapArgs{hModule, variant});
+    auto* rawArgs = args.release();
     const HANDLE hThread = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
-        auto* args = static_cast<BootstrapArgs*>(param);
+        const std::unique_ptr<BootstrapArgs> args(
+            static_cast<BootstrapArgs*>(param));
         fs::path baseDir = GetModuleDirectory(args->hModule);
         g_app = std::make_unique<Application>(baseDir, args->variant);
         if (!g_app->IsOk()) {
             g_app.reset();
             g_bootstrapStarted.clear(std::memory_order_release);
-            delete args;
             return 0;
         }
         // Publish for loader-specific UI consumers (e.g. overlay).
         g_runningApp.store(g_app.get(), std::memory_order_release);
-        delete args;
         return 0;
-    }, args, 0, nullptr);
+    }, rawArgs, 0, nullptr);
 
     if (hThread) {
         CloseHandle(hThread);
     } else {
-        // CreateThread failed; release the args and the latch so a retry
-        // is possible.
-        delete args;
+        // CreateThread failed; reclaim ownership and release the latch so a
+        // retry is possible.
+        const std::unique_ptr<BootstrapArgs> reclaim(rawArgs);
         g_bootstrapStarted.clear(std::memory_order_release);
     }
 }

@@ -14,6 +14,7 @@
 #include <filesystem>
 
 #include "core/config.hpp"
+#include "core/cvar_runtime_coordinator.hpp"
 #include "core/hook_engine.hpp"
 #include "tweaks/tweak_manager.hpp"
 
@@ -22,7 +23,7 @@ namespace jst {
 enum class LoaderVariant { Asi, ReShadeAddon };
 
 /// Top-level orchestrator. Owns the lifetime of every subsystem (logger,
-/// config, cvar pump, hook engine, tweak manager). Constructed exactly once
+/// config, CVar resolver/dispatcher, hook engine, tweak manager). Constructed exactly once
 /// on a worker thread launched by `BootstrapAsync`.
 class Application final {
 public:
@@ -40,19 +41,24 @@ public:
     // read-many afterwards". Loader-specific code that calls these from the
     // render thread is safe once `GetRunningApplication()` has returned a
     // non-null pointer.
-    [[nodiscard]] const jst::tweaks::TweakManager& GetTweakManager() const noexcept { return m_tweakManager; }
-    [[nodiscard]] const jst::core::Config&         GetConfig()       const noexcept { return m_config; }
-
-    // Non-const accessor for loader-specific code that needs to mutate config
-    // values at runtime (e.g. the ReShade overlay writing slider/checkbox
-    // changes back to JediSurvivorTweaks.ini via Config::Set*+Save).
-    [[nodiscard]] jst::core::Config& GetConfigMutable() noexcept { return m_config; }
+    [[nodiscard]] jst::tweaks::TweakManager& GetTweakManager() noexcept {
+        return m_tweakManager;
+    }
+    [[nodiscard]] const jst::tweaks::TweakManager& GetTweakManager()
+        const noexcept {
+        return m_tweakManager;
+    }
+    [[nodiscard]] jst::core::Config& GetConfig() noexcept { return m_config; }
+    [[nodiscard]] const jst::core::Config& GetConfig() const noexcept {
+        return m_config;
+    }
 
 private:
     bool                          m_ok = false;
     LoaderVariant                 m_variant;
     jst::core::Config             m_config;
     jst::core::HookEngine         m_hookEngine;
+    jst::core::CVarRuntimeCoordinator m_cvarRuntime;
     jst::tweaks::TweakManager     m_tweakManager;
 };
 

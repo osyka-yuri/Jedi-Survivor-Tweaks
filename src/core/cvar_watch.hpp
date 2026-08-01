@@ -3,11 +3,13 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
+#include <utility>
 
 namespace jst::core {
 
-class CVarSystem;
+class CVarWatchControl;
 
 enum class CVarWatchDecision : uint8_t {
     Continue,
@@ -15,12 +17,12 @@ enum class CVarWatchDecision : uint8_t {
 };
 
 /**
- * Pump-driven observation of an integer CVar.
+ * Game-thread observation of an integer CVar.
  *
- * Callback priority on a pump tick is shouldAbort -> timeout -> onValue.
- * Callbacks run on the CVar pump thread with no resolver or registry mutex
+ * Callback priority on a post-Tick pass is shouldAbort -> timeout -> onValue.
+ * Callbacks run after FEngineLoop::Tick with no resolver or registry mutex
  * held. They may call SetInt/SetFloat/WatchInt, but must not reset their own
- * subscription or stop the pump.
+ * subscription or stop the CVar system.
  */
 struct IntWatchRequest {
     std::wstring name;
@@ -46,15 +48,20 @@ public:
     CVarWatchSubscription& operator=(CVarWatchSubscription&& other) noexcept;
 
     void Reset();
-    [[nodiscard]] explicit operator bool() const noexcept { return m_owner != nullptr; }
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return m_control != nullptr;
+    }
 
 private:
     friend class CVarSystem;
-    CVarWatchSubscription(CVarSystem* owner, uint64_t id) noexcept
-        : m_owner(owner), m_id(id) {}
+#if defined(JST_UNIT_TESTS)
+    friend class CVarWatchSubscriptionTestAccess;
+#endif
+    explicit CVarWatchSubscription(
+        std::shared_ptr<CVarWatchControl> control) noexcept
+        : m_control(std::move(control)) {}
 
-    CVarSystem* m_owner = nullptr;
-    uint64_t m_id = 0;
+    std::shared_ptr<CVarWatchControl> m_control;
 };
 
 } // namespace jst::core

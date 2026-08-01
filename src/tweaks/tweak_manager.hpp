@@ -1,18 +1,35 @@
 #pragma once
 
-#include "tweak.hpp"
 #include "core/logging.hpp"
+#include "tweak.hpp"
+
+#include <algorithm>
 #include <functional>
 #include <memory>
+#include <string>
+#include <type_traits>
 #include <vector>
-#include <algorithm>
 
 namespace jst::core {
-    class HookEngine;
-    class Config;
+class HookEngine;
+class Config;
 }
 
 namespace jst::tweaks {
+
+enum class TweakStage : uint8_t {
+    Registered,
+    Disabled,
+    Prepared,
+    Resolved,
+    Active,
+    Failed,
+};
+
+struct TweakStatus {
+    TweakStage stage = TweakStage::Registered;
+    std::string error;
+};
 
 class TweakManager final {
 public:
@@ -24,32 +41,51 @@ public:
     TweakManager(TweakManager&&) = delete;
     TweakManager& operator=(TweakManager&&) = delete;
 
-    [[nodiscard]] std::expected<size_t, std::string> Initialize(core::HookEngine& hooks, core::Config& config);
+    [[nodiscard]] std::expected<void, std::string> Prepare(
+        core::HookEngine& hooks,
+        const core::Config& config);
+    void FinalizeResolution(core::HookEngine& hooks);
+    [[nodiscard]] size_t FinalizeInstallation(core::HookEngine& hooks);
     void Shutdown();
 
     template<typename T, typename... Args>
-    void RegisterTweak(Args&&... args) {
-        static_assert(std::is_base_of_v<ITweak, T>, "T must inherit from ITweak");
+    bool RegisterTweak(Args&&... args) {
+        static_assert(std::is_base_of_v<ITweak, T>);
+        if (m_started) {
+            JST_LOG_ERROR("Cannot register a tweak after TweakManager start.");
+            return false;
+        }
         auto tweak = std::make_unique<T>(std::forward<Args>(args)...);
         const std::string_view name = tweak->Name();
-        if (std::ranges::contains(m_tweaks, name, &ITweak::Name)) {
+        if (std::ranges::any_of(m_entries, [name](const Entry& entry) {
+                return entry.tweak->Name() == name;
+            })) {
             JST_LOG_WARNING("Tweak '{}' already registered.", name);
-            return;
+            return false;
         }
-        m_tweaks.push_back(std::move(tweak));
+        m_entries.push_back(Entry{.tweak = std::move(tweak)});
+        return true;
     }
 
-    [[nodiscard]] size_t GetTweakCount() const { return m_tweaks.size(); }
+    [[nodiscard]] size_t GetTweakCount() const noexcept {
+        return m_entries.size();
+    }
 
-    /// Visit every registered tweak in registration order. The visitor
-    /// receives a non-const reference so it can call non-const methods such
-    /// as GetRuntimeControls(). Mutations to runtime state should go through
-    /// the RuntimeControl callbacks, not the tweak object directly.
-    void IterateTweaks(std::function<void(ITweak&)> visitor) const;
+    void IterateTweaks(
+        const std::function<void(ITweak&, const TweakStatus&)>& visitor);
+    void IterateTweaks(
+        const std::function<void(const ITweak&, const TweakStatus&)>& visitor)
+        const;
 
 private:
-    std::vector<std::unique_ptr<ITweak>> m_tweaks;
-    bool m_initialized = false;
+    struct Entry {
+        std::unique_ptr<ITweak> tweak;
+        TweakStatus status;
+        bool prepared = false;
+    };
+
+    std::vector<Entry> m_entries;
+    bool m_started = false;
 };
 
 } // namespace jst::tweaks

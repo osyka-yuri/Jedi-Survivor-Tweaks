@@ -28,7 +28,7 @@ public:
         jst::core::Config& config) override;
 
 protected:
-    void OnConfigLoaded(jst::core::Config& config) override;
+    void OnConfigLoaded(const jst::core::Config& config) override;
 
 private:
     void ApplySetting();

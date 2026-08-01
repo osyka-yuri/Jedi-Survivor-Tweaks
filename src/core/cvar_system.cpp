@@ -9,29 +9,96 @@
 #include "string_utils.hpp"
 
 #include <algorithm>
-#include <type_traits>
+#include <array>
+#include <charconv>
+#include <cmath>
+#include <exception>
+#include <format>
 #include <utility>
 
 namespace jst::core {
 
 namespace {
 
-template <typename T>
-constexpr const char* TypeName() noexcept {
-    if constexpr (std::is_same_v<T, int32_t>) {
-        return "int";
-    } else {
-        return "float";
+[[nodiscard]] std::string_view LastSetByName(uint32_t flags) noexcept {
+    switch (flags & cvar_layout::kSetByMask) {
+    case 0x00000000: return "Constructor";
+    case 0x01000000: return "Scalability";
+    case 0x02000000: return "GameSetting";
+    case 0x03000000: return "ProjectSetting";
+    case 0x04000000: return "DeviceProfile";
+    case 0x05000000: return "SystemSettingsIni";
+    case 0x06000000: return "ConsoleVariablesIni";
+    case 0x07000000: return "Commandline";
+    case 0x08000000: return "Code";
+    case cvar_layout::kSetByConsole: return "Console";
+    default: return "Unknown";
     }
 }
 
+[[nodiscard]] bool InvokeSetterNoexcept(
+    uintptr_t setterAddress,
+    uintptr_t object,
+    const wchar_t* value) noexcept {
+    __try {
+        using Setter = void(__fastcall*)(uintptr_t, const wchar_t*, uint32_t);
+        reinterpret_cast<Setter>(setterAddress)(
+            object,
+            value,
+            cvar_layout::kSetByConsole);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+[[nodiscard]] std::optional<std::wstring> FormatFloat(float value) {
+    if (!std::isfinite(value)) {
+        return std::nullopt;
+    }
+    char buffer[64]{};
+    const auto converted = std::to_chars(
+        std::begin(buffer),
+        std::end(buffer),
+        value,
+        std::chars_format::general);
+    if (converted.ec != std::errc{}) {
+        return std::nullopt;
+    }
+    return utils::Utf8ToWide(std::string_view(
+        buffer,
+        static_cast<size_t>(converted.ptr - buffer)));
+}
+
 } // namespace
+
+struct CVarCommandTicket::SharedState {
+    mutable std::mutex mutex;
+    CVarCommandState state = CVarCommandState::Pending;
+    CVarSupersedeReason supersedeReason = CVarSupersedeReason::None;
+    std::string diagnostic;
+};
+
+CVarCommandSnapshot CVarCommandTicket::Snapshot() const {
+    if (!m_state) {
+        return CVarCommandSnapshot{
+            .state = CVarCommandState::Failed,
+            .diagnostic = "empty CVar command ticket",
+        };
+    }
+    std::lock_guard lock(m_state->mutex);
+    return CVarCommandSnapshot{
+        .state = m_state->state,
+        .supersedeReason = m_state->supersedeReason,
+        .diagnostic = m_state->diagnostic,
+    };
+}
 
 CVarSystem::CVarSystem()
     : m_watches(std::make_unique<CVarWatchRegistry>()) {}
 
 CVarSystem::~CVarSystem() {
-    StopPump();
+    Stop();
 }
 
 CVarSystem& CVarSystem::Instance() {
@@ -39,229 +106,504 @@ CVarSystem& CVarSystem::Instance() {
     return instance;
 }
 
+CVarCommandTicket CVarSystem::MakeTicket() {
+    return CVarCommandTicket(std::make_shared<CVarCommandTicket::SharedState>());
+}
+
+void CVarSystem::CompleteTicket(
+    const CVarCommandTicket& ticket,
+    CVarCommandState state,
+    std::string diagnostic,
+    CVarSupersedeReason supersedeReason) {
+    if (!ticket.m_state) {
+        return;
+    }
+    std::lock_guard lock(ticket.m_state->mutex);
+    if (ticket.m_state->state != CVarCommandState::Pending) {
+        return;
+    }
+    ticket.m_state->state = state;
+    ticket.m_state->supersedeReason = supersedeReason;
+    ticket.m_state->diagnostic = std::move(diagnostic);
+}
+
+CVarQueueResult CVarSystem::RejectedResult(
+    std::string reason,
+    CVarRejectionReason rejection) {
+    auto ticket = MakeTicket();
+    CompleteTicket(ticket, CVarCommandState::Failed, std::move(reason));
+    return CVarQueueResult{
+        .result = CVarSetResult::Rejected,
+        .ticket = std::move(ticket),
+        .rejection = rejection,
+    };
+}
+
 CVarWatchSubscription::~CVarWatchSubscription() {
     Reset();
 }
 
-CVarWatchSubscription::CVarWatchSubscription(CVarWatchSubscription&& other) noexcept
-    : m_owner(std::exchange(other.m_owner, nullptr)),
-      m_id(std::exchange(other.m_id, 0)) {}
+CVarWatchSubscription::CVarWatchSubscription(
+    CVarWatchSubscription&& other) noexcept
+    : m_control(std::move(other.m_control)) {}
 
 CVarWatchSubscription& CVarWatchSubscription::operator=(
     CVarWatchSubscription&& other) noexcept {
     if (this != &other) {
         Reset();
-        m_owner = std::exchange(other.m_owner, nullptr);
-        m_id = std::exchange(other.m_id, 0);
+        m_control = std::move(other.m_control);
     }
     return *this;
 }
 
 void CVarWatchSubscription::Reset() {
-    if (m_owner) {
-        m_owner->CancelWatch(m_id);
+    if (m_control) {
+        m_control->CancelAndWait();
     }
-    m_owner = nullptr;
-    m_id = 0;
+    m_control.reset();
+}
+
+CVarSystemState CVarSystem::State() const noexcept {
+    std::lock_guard lock(m_mutex);
+    return m_state;
+}
+
+std::string CVarSystem::UnavailableReason() const {
+    std::lock_guard lock(m_mutex);
+    return m_unavailableReason;
 }
 
 const ModuleInfo* CVarSystem::GetOrFetchModule() {
-    std::lock_guard lock(m_moduleMutex);
     if (!m_module) {
         m_module = GetGameModuleInfo();
     }
     return m_module ? &*m_module : nullptr;
 }
 
-template <typename T>
-bool CVarSystem::WriteValue(const ResolvedCVar& resolved, T value) {
-    if (resolved.writeAddrShadow == resolved.writeAddr + sizeof(T)) {
-        return utils::SafeWritePair<T>(resolved.writeAddr, value);
+CVarQueueResult CVarSystem::SetString(
+    std::wstring_view name,
+    std::wstring_view value,
+    CVarCommandSource source) {
+    if (name.empty() || value.empty() ||
+        name.find(L'\0') != std::wstring_view::npos ||
+        value.find(L'\0') != std::wstring_view::npos) {
+        return RejectedResult(
+            "CVar name and value must be non-empty text",
+            CVarRejectionReason::InvalidRequest);
     }
-    if (!utils::SafeWrite<T>(resolved.writeAddr, value)) {
-        return false;
-    }
-    if (resolved.writeAddrShadow != 0 &&
-        !utils::SafeWrite<T>(resolved.writeAddrShadow, value)) {
-        return false;
-    }
-    return true;
+    return QueueWrite(name, std::wstring(value), source);
 }
 
-void CVarSystem::UpdateFlags(const ResolvedCVar& resolved, std::wstring_view name) {
-    if (!resolved.cvarObject || !utils::IsValidPointer(resolved.cvarObject)) {
+CVarQueueResult CVarSystem::SetInt(
+    std::wstring_view name,
+    int32_t value,
+    CVarCommandSource source) {
+    return SetString(name, std::to_wstring(value), source);
+}
+
+CVarQueueResult CVarSystem::SetFloat(
+    std::wstring_view name,
+    float value,
+    CVarCommandSource source) {
+    const auto formatted = FormatFloat(value);
+    if (!formatted) {
+        return RejectedResult(
+            "CVar float must be finite and formattable",
+            CVarRejectionReason::InvalidRequest);
+    }
+    return SetString(name, *formatted, source);
+}
+
+CVarSystem::CVarEntry& CVarSystem::EnsureEntryLocked(
+    std::wstring_view name) {
+    auto [found, inserted] = m_cache.try_emplace(std::wstring(name));
+    if (inserted) {
+        found->second.firstSeen = std::chrono::steady_clock::now();
+        found->second.scanData.name = found->first;
+        m_needsInitialScan.push_back(found->first);
+    }
+    return found->second;
+}
+
+CVarQueueResult CVarSystem::QueueWrite(
+    std::wstring_view name,
+    std::wstring value,
+    CVarCommandSource source) {
+    const std::array requests{CVarWriteRequest{
+        .name = std::wstring(name),
+        .value = std::move(value),
+    }};
+    auto batch = QueueRequests(requests, source);
+    if (!batch.Accepted()) {
+        JST_LOG_WARNING(
+            "Rejected CVar write for '{}': {}.",
+            utils::WideToUtf8(name),
+            batch.diagnostic);
+        return RejectedResult(
+            std::move(batch.diagnostic),
+            batch.rejection);
+    }
+    return std::move(batch.commands.front());
+}
+
+CVarBatchResult CVarSystem::QueueBatch(
+    std::span<const CVarWriteRequest> requests) {
+    return QueueRequests(requests, CVarCommandSource::Managed);
+}
+
+CVarBatchResult CVarSystem::QueueRequests(
+    std::span<const CVarWriteRequest> requests,
+    CVarCommandSource source) {
+    if (requests.empty()) {
+        return CVarBatchResult{
+            .rejection = CVarRejectionReason::InvalidRequest,
+            .diagnostic = "CVar batch must contain at least one command",
+        };
+    }
+
+    const CVarNameEqual equal;
+    for (size_t i = 0; i < requests.size(); ++i) {
+        const auto& request = requests[i];
+        if (request.name.empty() || request.value.empty() ||
+            request.name.find(L'\0') != std::wstring::npos ||
+            request.value.find(L'\0') != std::wstring::npos) {
+            return CVarBatchResult{
+                .rejection = CVarRejectionReason::InvalidRequest,
+                .diagnostic = "CVar name and value must be non-empty text",
+            };
+        }
+        for (size_t duplicate = 0; duplicate < i; ++duplicate) {
+            if (equal(request.name, requests[duplicate].name)) {
+                return CVarBatchResult{
+                    .rejection = CVarRejectionReason::InvalidRequest,
+                    .diagnostic = std::format(
+                        "CVar batch contains duplicate name '{}'",
+                        utils::WideToUtf8(request.name)),
+                };
+            }
+        }
+    }
+
+    CVarBatchResult queued;
+    queued.commands.reserve(requests.size());
+    std::vector<std::wstring> managedReplacements;
+    {
+        std::lock_guard lock(m_mutex);
+        if (m_state != CVarSystemState::Running) {
+            return CVarBatchResult{
+                .rejection = CVarRejectionReason::SystemUnavailable,
+                .diagnostic = m_unavailableReason.empty()
+                    ? "CVar system is not running"
+                    : m_unavailableReason,
+            };
+        }
+
+        for (const auto& request : requests) {
+            if (source == CVarCommandSource::Custom &&
+                m_managedClaims.contains(request.name)) {
+                return CVarBatchResult{
+                    .rejection = CVarRejectionReason::ManagedConflict,
+                    .diagnostic = std::format(
+                        "'{}' is controlled by a specialized tweak",
+                        utils::WideToUtf8(request.name)),
+                };
+            }
+        }
+
+        for (const auto& request : requests) {
+            auto& entry = EnsureEntryLocked(request.name);
+            auto ticket = MakeTicket();
+            const bool replaced = entry.write.has_value();
+            if (entry.write) {
+                const bool managedPriority =
+                    source == CVarCommandSource::Managed &&
+                    entry.write->source == CVarCommandSource::Custom;
+                if (managedPriority) {
+                    managedReplacements.push_back(request.name);
+                }
+                CompleteTicket(
+                    entry.write->ticket,
+                    CVarCommandState::Superseded,
+                    "replaced by a newer CVar value",
+                    managedPriority
+                        ? CVarSupersedeReason::ManagedPriority
+                        : CVarSupersedeReason::NewerValue);
+            }
+            if (source == CVarCommandSource::Managed) {
+                m_managedClaims.insert(request.name);
+            }
+            entry.write = PendingWrite{
+                .value = request.value,
+                .source = source,
+                .generation = m_nextGeneration++,
+                .ticket = ticket,
+            };
+            if (m_nextGeneration == 0) {
+                m_nextGeneration = 1;
+            }
+            queued.commands.push_back(CVarQueueResult{
+                .result = replaced
+                    ? CVarSetResult::Replaced
+                    : CVarSetResult::Queued,
+                .ticket = std::move(ticket),
+            });
+        }
+    }
+
+    for (const auto& name : managedReplacements) {
+        JST_LOG_WARNING(
+            "Custom CVar '{}' was superseded by its specialized tweak.",
+            utils::WideToUtf8(name));
+    }
+    m_resolverCv.notify_all();
+    return queued;
+}
+
+void CVarSystem::ClaimManaged(std::wstring_view name) {
+    if (name.empty() || name.find(L'\0') != std::wstring_view::npos) {
         return;
     }
 
-    const uintptr_t flagsAddress = resolved.cvarObject + cvar_layout::kFlagsOffset;
-    const uint32_t currentFlags = utils::SafeReadInt32(flagsAddress);
-    const uint32_t newFlags =
-        (currentFlags & cvar_layout::kFlagBitsMask) | cvar_layout::kSetByConsole;
-    if (utils::SafeWrite<uint32_t>(flagsAddress, newFlags)) {
-        JST_LOG_DEBUG("Updated priority flags for '{}' at 0x{:X}: 0x{:08X} -> 0x{:08X}.",
-                      utils::WideToUtf8(name), flagsAddress, currentFlags, newFlags);
-    }
-}
+    bool supersededCustom = false;
+    {
+        std::lock_guard lock(m_mutex);
+        m_managedClaims.emplace(name);
 
-template <typename T>
-bool CVarSystem::WriteResolved(
-    const ResolvedCVar& resolved, std::wstring_view name, T value) {
-    const T oldValue = std::is_same_v<T, int32_t>
-        ? static_cast<T>(utils::SafeReadInt32(resolved.writeAddr))
-        : static_cast<T>(utils::SafeReadFloat(resolved.writeAddr));
-
-    if (!WriteValue<T>(resolved, value)) {
-        return false;
-    }
-
-    JST_LOG_INFO("Wrote {} for '{}' {} -> {}.",
-                 TypeName<T>(), utils::WideToUtf8(name), oldValue, value);
-    UpdateFlags(resolved, name);
-    return true;
-}
-
-void CVarSystem::EnqueuePendingLocked(
-    std::wstring_view name, std::optional<CVarValue> target) {
-    PendingState pending;
-    pending.targetValue = std::move(target);
-    pending.firstSeen = std::chrono::steady_clock::now();
-    m_cache.emplace(std::wstring(name), std::move(pending));
-    m_needsInitialScan.emplace_back(name);
-    m_pumpCv.notify_all();
-}
-
-bool CVarSystem::HasPendingLocked() const {
-    return std::ranges::any_of(m_cache, [](const auto& item) {
-        if (std::holds_alternative<PendingState>(item.second)) {
-            return true;
+        const auto found = m_cache.find(name);
+        if (found != m_cache.end() && found->second.write &&
+            found->second.write->source == CVarCommandSource::Custom) {
+            CompleteTicket(
+                found->second.write->ticket,
+                CVarCommandState::Superseded,
+                "claimed by a specialized tweak",
+                CVarSupersedeReason::ManagedPriority);
+            found->second.write.reset();
+            supersededCustom = true;
         }
-        const auto& resolved = std::get<ResolvedEntryPtr>(item.second);
-        std::lock_guard valueLock(resolved->valueMutex);
-        return resolved->pendingWrite.has_value();
+    }
+
+    if (supersededCustom) {
+        JST_LOG_WARNING(
+            "Pending custom CVar '{}' was superseded by its specialized tweak.",
+            utils::WideToUtf8(name));
+    }
+}
+
+bool CVarSystem::HasResolverWorkLocked() const {
+    if (!m_needsInitialScan.empty()) {
+        return true;
+    }
+    return std::ranges::any_of(m_cache, [](const auto& item) {
+        return !item.second.resolved.has_value();
     });
 }
 
-template <typename T>
-bool CVarSystem::SetTyped(std::wstring_view name, T value) {
-    std::unique_lock cacheLock(m_mutex);
-    if (auto found = m_cache.find(name); found != m_cache.end()) {
-        if (auto* pending = std::get_if<PendingState>(&found->second)) {
-            pending->targetValue = CVarValue{value};
-            return false;
+void CVarSystem::FailAllCommandsLocked(std::string_view reason) {
+    for (auto& [name, entry] : m_cache) {
+        (void)name;
+        if (entry.write) {
+            CompleteTicket(
+                entry.write->ticket,
+                CVarCommandState::Failed,
+                std::string(reason));
+            entry.write.reset();
         }
+    }
+}
 
-        const auto resolved = std::get<ResolvedEntryPtr>(found->second);
-        std::unique_lock valueLock(resolved->valueMutex);
-        cacheLock.unlock();
-        resolved->pendingWrite = CVarValue{value};
-        resolved->pendingWriteSince = std::chrono::steady_clock::now();
-        if (WriteResolved<T>(resolved->resolved, name, value)) {
-            resolved->pendingWrite.reset();
-            return true;
-        }
-        valueLock.unlock();
-        m_pumpCv.notify_all();
-        JST_LOG_WARNING("CVar write for '{}' failed and was queued for retry.",
-                        utils::WideToUtf8(name));
+bool CVarSystem::OpenGameSettingsBarrier() {
+    std::lock_guard lock(m_mutex);
+    if (m_state != CVarSystemState::Running) {
         return false;
     }
-
-    EnqueuePendingLocked(name, CVarValue{value});
-    JST_LOG_DEBUG("CVar '{}' queued for async init.", utils::WideToUtf8(name));
-    return false;
+    m_gameSettingsReady = true;
+    return true;
 }
 
-bool CVarSystem::SetInt(std::wstring_view name, int32_t value) {
-    return SetTyped(name, value);
+std::expected<void, std::string> CVarSystem::InvokeStringSetter(
+    const ResolvedCVar& resolved,
+    std::wstring_view name,
+    std::wstring_view value) const {
+    if (!ValidateResolvedCVar(resolved)) {
+        return std::unexpected("resolved object or string setter is no longer valid");
+    }
+
+    const uint32_t before = utils::SafeReadInt32(
+        resolved.cvarObject + cvar_layout::kFlagsOffset);
+    const std::wstring terminated(value);
+    if (!InvokeSetterNoexcept(
+            resolved.stringSetter,
+            resolved.cvarObject,
+            terminated.c_str())) {
+        return std::unexpected("SEH caught while invoking the Unreal string setter");
+    }
+
+    const uint32_t after = utils::SafeReadInt32(
+        resolved.cvarObject + cvar_layout::kFlagsOffset);
+    if ((after & cvar_layout::kSetByMask) != cvar_layout::kSetByConsole) {
+        return std::unexpected(std::format(
+            "setter returned with LastSetBy {} instead of Console",
+            LastSetByName(after)));
+    }
+
+    JST_LOG_INFO(
+        "Set CVar '{}' to '{}' via IConsoleVariable::Set ({} -> Console).",
+        utils::WideToUtf8(name),
+        utils::WideToUtf8(value),
+        LastSetByName(before));
+    return {};
 }
 
-bool CVarSystem::SetFloat(std::wstring_view name, float value) {
-    return SetTyped(name, value);
+void CVarSystem::ProcessPendingCommands() {
+    struct WriteSnapshot {
+        std::wstring name;
+        ResolvedCVar resolved;
+        PendingWrite write;
+    };
+    std::vector<WriteSnapshot> writes;
+    {
+        std::lock_guard lock(m_mutex);
+        if (m_state != CVarSystemState::Running ||
+            !m_gameSettingsReady) {
+            return;
+        }
+        for (const auto& [name, entry] : m_cache) {
+            if (!entry.resolved) {
+                continue;
+            }
+            if (entry.write) {
+                writes.push_back(WriteSnapshot{
+                    .name = name,
+                    .resolved = *entry.resolved,
+                    .write = *entry.write,
+                });
+            }
+        }
+    }
+
+    for (const auto& snapshot : writes) {
+        const auto applied = InvokeStringSetter(
+            snapshot.resolved,
+            snapshot.name,
+            snapshot.write.value);
+        CompleteTicket(
+            snapshot.write.ticket,
+            applied ? CVarCommandState::Applied : CVarCommandState::Failed,
+            applied ? std::string{} : applied.error());
+        if (!applied) {
+            JST_LOG_ERROR(
+                "CVar write for '{}' failed: {}. It will not be retried.",
+                utils::WideToUtf8(snapshot.name),
+                applied.error());
+        }
+
+        {
+            std::lock_guard lock(m_mutex);
+            const auto found = m_cache.find(snapshot.name);
+            if (found != m_cache.end() && found->second.write &&
+                found->second.write->generation == snapshot.write.generation) {
+                found->second.write.reset();
+            }
+        }
+    }
 }
 
 CVarWatchSubscription CVarSystem::WatchInt(IntWatchRequest request) {
-    if (request.name.empty() || !request.onValue) {
+    if (request.name.empty() || !request.onValue ||
+        request.timeout < std::chrono::milliseconds::zero()) {
         return {};
     }
 
     const std::wstring name = request.name;
-    const uint64_t id = m_watches->Register(std::move(request));
+    std::shared_ptr<CVarWatchControl> control;
     {
         std::lock_guard lock(m_mutex);
-        if (!m_cache.contains(name)) {
-            EnqueuePendingLocked(name, std::nullopt);
+        if (m_state != CVarSystemState::Running) {
+            return {};
         }
+        // Registration is serialized with the lifecycle state transition, so
+        // Stop cannot clear the registry and then lose a late insertion.
+        control = m_watches->Register(std::move(request));
+        (void)EnsureEntryLocked(name);
     }
-    m_pumpCv.notify_all();
-    JST_LOG_DEBUG("CVar watch #{} registered for '{}'.", id, utils::WideToUtf8(name));
-    return CVarWatchSubscription(this, id);
+    m_resolverCv.notify_all();
+    return CVarWatchSubscription(std::move(control));
 }
 
-void CVarSystem::CancelWatch(uint64_t id) {
-    m_watches->Cancel(id);
-    JST_LOG_DEBUG("CVar watch #{} cancelled.", id);
-}
-
-std::optional<int32_t> CVarSystem::ReadResolvedInt(std::wstring_view name) const {
-    ResolvedEntryPtr entry;
+std::optional<int32_t> CVarSystem::ReadResolvedInt(
+    std::wstring_view name) const {
+    std::optional<ResolvedCVar> resolved;
     {
         std::lock_guard lock(m_mutex);
         const auto found = m_cache.find(name);
         if (found == m_cache.end()) {
             return std::nullopt;
         }
-        const auto* resolved = std::get_if<ResolvedEntryPtr>(&found->second);
-        if (!resolved) {
-            return std::nullopt;
-        }
-        entry = *resolved;
+        resolved = found->second.resolved;
     }
-
-    std::lock_guard valueLock(entry->valueMutex);
-    return utils::SafeReadInt32(entry->resolved.writeAddr);
+    if (!resolved || !ValidateResolvedCVar(*resolved)) {
+        return std::nullopt;
+    }
+    const uintptr_t address = ResolveCVarReadAddress(*resolved);
+    if (!address || !utils::IsValidPointer(address)) {
+        return std::nullopt;
+    }
+    return utils::SafeReadInt32(address);
 }
 
-void CVarSystem::RetryPendingWrites() {
-    struct Snapshot {
-        std::wstring name;
-        ResolvedEntryPtr entry;
+void CVarSystem::FinishGameThreadPass() noexcept {
+    std::lock_guard lock(m_mutex);
+    --m_activeGameThreadPasses;
+    m_stateCv.notify_all();
+}
+
+void CVarSystem::OnGameThreadTick() {
+    struct PassGuard {
+        CVarSystem* owner;
+        ~PassGuard() { owner->FinishGameThreadPass(); }
     };
 
-    std::vector<Snapshot> snapshots;
-    std::chrono::milliseconds timeout;
+    bool watchBarrierOpen = false;
+    bool openedWatchBarrier = false;
+    std::chrono::steady_clock::time_point barrierTime{};
     {
         std::lock_guard lock(m_mutex);
-        timeout = m_pendingTimeout;
-        for (const auto& [name, state] : m_cache) {
-            const auto* resolved = std::get_if<ResolvedEntryPtr>(&state);
-            if (resolved) {
-                snapshots.push_back(Snapshot{.name = name, .entry = *resolved});
+        if (m_state != CVarSystemState::Running) {
+            return;
+        }
+        ++m_activeGameThreadPasses;
+        if (!m_gameThreadReady) {
+            m_gameThreadReady = true;
+            barrierTime = std::chrono::steady_clock::now();
+            for (auto& [name, entry] : m_cache) {
+                (void)name;
+                entry.firstSeen = barrierTime;
             }
         }
+        if (m_gameSettingsReady && !m_watchBarrierOpened) {
+            m_watchBarrierOpened = true;
+            barrierTime = std::chrono::steady_clock::now();
+            openedWatchBarrier = true;
+        }
+        watchBarrierOpen = m_watchBarrierOpened;
+    }
+    const PassGuard guard{this};
+
+    if (openedWatchBarrier) {
+        m_watches->OpenStartupBarrier(barrierTime);
+    }
+    ProcessPendingCommands();
+
+    if (!watchBarrierOpen) {
+        return;
     }
 
     const auto now = std::chrono::steady_clock::now();
-    for (const auto& snapshot : snapshots) {
-        std::unique_lock valueLock(snapshot.entry->valueMutex);
-        if (!snapshot.entry->pendingWrite) {
-            continue;
-        }
-        if (now - snapshot.entry->pendingWriteSince > timeout) {
-            snapshot.entry->pendingWrite.reset();
-            valueLock.unlock();
-            JST_LOG_WARNING("Deferred write for '{}' timed out.",
-                            utils::WideToUtf8(snapshot.name));
-            continue;
-        }
-
-        bool writeSucceeded = false;
-        std::visit([&](auto value) {
-            writeSucceeded = WriteResolved(
-                snapshot.entry->resolved, snapshot.name, value);
-        }, *snapshot.entry->pendingWrite);
-        if (writeSucceeded) {
-            snapshot.entry->pendingWrite.reset();
-        }
+    if (now >= m_nextWatchEvaluation) {
+        m_nextWatchEvaluation = now + std::chrono::milliseconds(100);
+        m_watches->Evaluate([this](std::wstring_view name) {
+            return ReadResolvedInt(name);
+        });
     }
 }
 
@@ -269,7 +611,8 @@ void CVarSystem::PerformInitialScan() {
     std::vector<std::wstring> names;
     {
         std::lock_guard lock(m_mutex);
-        if (m_needsInitialScan.empty()) {
+        if (m_state != CVarSystemState::Running ||
+            m_needsInitialScan.empty()) {
             return;
         }
         names = std::move(m_needsInitialScan);
@@ -291,30 +634,33 @@ void CVarSystem::PerformInitialScan() {
     for (const auto& name : names) {
         views.push_back(name);
     }
-
     auto scanned = ScanForNames(views, *module);
+
     std::lock_guard lock(m_mutex);
     for (auto& result : scanned) {
         const auto found = m_cache.find(result.name);
-        if (found == m_cache.end()) {
-            continue;
-        }
-        if (auto* pending = std::get_if<PendingState>(&found->second)) {
-            pending->scanData = std::move(result);
+        if (found != m_cache.end() && !found->second.resolved) {
+            found->second.scanData = std::move(result);
         }
     }
-
     for (const auto& name : names) {
         const auto found = m_cache.find(name);
-        if (found == m_cache.end()) {
+        if (found == m_cache.end() || found->second.resolved ||
+            found->second.scanData.strAddr != 0) {
             continue;
         }
-        const auto* pending = std::get_if<PendingState>(&found->second);
-        if (pending && pending->scanData.strAddr == 0) {
-            JST_LOG_WARNING("CVar '{}' not found in game binary. Dropped.",
-                            utils::WideToUtf8(name));
-            m_cache.erase(found);
+        if (found->second.write) {
+            CompleteTicket(
+                found->second.write->ticket,
+                CVarCommandState::Failed,
+                "CVar name was not found in the game binary");
         }
+        JST_LOG_WARNING(
+            "CVar '{}' was not found in the game binary. Dropped.",
+            utils::WideToUtf8(name));
+        // The watch registry owns its own timeout and cancellation state. It
+        // does not need an empty cache placeholder to time out cleanly.
+        m_cache.erase(found);
     }
 }
 
@@ -323,166 +669,190 @@ void CVarSystem::ResolvePendingCVars(const ModuleInfo& module) {
         std::wstring name;
         ScanEntry scanData;
         const CVarOverride* overrideEntry = nullptr;
-        std::chrono::steady_clock::time_point firstSeen;
+        std::chrono::steady_clock::time_point firstSeen{};
     };
 
     std::vector<Snapshot> snapshots;
-    std::chrono::milliseconds timeout;
+    const auto now = std::chrono::steady_clock::now();
+    bool gameThreadReady = false;
     {
         std::lock_guard lock(m_mutex);
-        timeout = m_pendingTimeout;
-        for (const auto& [name, state] : m_cache) {
-            const auto* pending = std::get_if<PendingState>(&state);
-            if (!pending || pending->scanData.strAddr == 0) {
+        gameThreadReady = m_gameThreadReady;
+        for (const auto& [name, entry] : m_cache) {
+            if (entry.resolved || entry.scanData.strAddr == 0) {
                 continue;
             }
             snapshots.push_back(Snapshot{
                 .name = name,
-                .scanData = pending->scanData,
-                .overrideEntry = CVarOverrideTable::Instance().Find(name),
-                .firstSeen = pending->firstSeen,
+                .scanData = entry.scanData,
+                .overrideEntry = FindCVarOverride(name),
+                .firstSeen = entry.firstSeen,
             });
         }
     }
 
-    const auto now = std::chrono::steady_clock::now();
-    std::vector<std::pair<std::wstring, ResolvedCVar>> resolved;
-    std::vector<std::wstring> expired;
+    std::vector<std::pair<std::wstring, ResolvedCVar>> resolvedEntries;
     for (auto& snapshot : snapshots) {
-        auto result = ResolveFromScan(
-            snapshot.scanData, module, snapshot.overrideEntry);
-        if (result) {
-            resolved.emplace_back(std::move(snapshot.name), *result);
-        } else if (now - snapshot.firstSeen > timeout) {
-            expired.push_back(std::move(snapshot.name));
+        auto resolved = ResolveFromScan(
+            snapshot.scanData,
+            module,
+            snapshot.overrideEntry);
+        if (resolved) {
+            resolvedEntries.emplace_back(std::move(snapshot.name), *resolved);
         }
     }
 
-    for (const auto& [name, value] : resolved) {
-        (void)CommitResolved(name, value);
-    }
-
-    std::vector<std::wstring> removed;
-    {
-        std::lock_guard lock(m_mutex);
-        for (auto& name : expired) {
-            if (m_watches->HasFor(name)) {
-                continue;
-            }
-            if (m_cache.erase(name) != 0) {
-                removed.push_back(std::move(name));
-            }
+    std::lock_guard lock(m_mutex);
+    for (const auto& [name, resolved] : resolvedEntries) {
+        const auto found = m_cache.find(name);
+        if (found != m_cache.end() && !found->second.resolved) {
+            found->second.resolved = resolved;
+            JST_LOG_DEBUG(
+                "Resolved IConsoleVariable object for '{}'.",
+                utils::WideToUtf8(name));
         }
     }
-    for (const auto& name : removed) {
-        JST_LOG_WARNING("Deferred init for '{}' timed out.", utils::WideToUtf8(name));
+
+    for (auto it = m_cache.begin(); it != m_cache.end();) {
+        auto& entry = it->second;
+        if (entry.resolved || !gameThreadReady ||
+            now - entry.firstSeen <= m_pendingTimeout) {
+            ++it;
+            continue;
+        }
+        if (entry.write) {
+            CompleteTicket(
+                entry.write->ticket,
+                CVarCommandState::Failed,
+                "CVar object resolution timed out");
+            entry.write.reset();
+        }
+        if (!m_watches->HasFor(it->first)) {
+            JST_LOG_WARNING(
+                "CVar object resolution for '{}' timed out.",
+                utils::WideToUtf8(it->first));
+            it = m_cache.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 
-bool CVarSystem::CommitResolved(std::wstring_view name, const ResolvedCVar& resolved) {
-    std::unique_lock cacheLock(m_mutex);
-    const auto found = m_cache.find(name);
-    if (found == m_cache.end()) {
-        return false;
-    }
-    auto* pending = std::get_if<PendingState>(&found->second);
-    if (!pending) {
-        return false;
-    }
-
-    const auto target = pending->targetValue;
-    auto entry = std::make_shared<ResolvedEntry>(resolved);
-    std::unique_lock valueLock(entry->valueMutex);
-    entry->pendingWrite = target;
-    entry->pendingWriteSince = std::chrono::steady_clock::now();
-    found->second = entry;
-    cacheLock.unlock();
-
-    bool writeSucceeded = true;
-    if (target) {
-        std::visit([&](auto value) {
-            writeSucceeded = WriteResolved(entry->resolved, name, value);
-        }, *target);
-        if (writeSucceeded) {
-            entry->pendingWrite.reset();
-        }
-    }
-
-    if (writeSucceeded) {
-        JST_LOG_DEBUG("Deferred init successful for '{}'.", utils::WideToUtf8(name));
-    } else {
-        JST_LOG_WARNING("Deferred resolve succeeded; initial write for '{}' will be retried.",
-                        utils::WideToUtf8(name));
-        valueLock.unlock();
-        m_pumpCv.notify_all();
-    }
-    return true;
-}
-
-void CVarSystem::PumpLoop(std::chrono::milliseconds period) {
+void CVarSystem::ResolverLoop(std::chrono::milliseconds period) {
     while (true) {
         {
             std::unique_lock lock(m_mutex);
-            const bool hasPeriodicWork =
-                HasPendingLocked() || !m_needsInitialScan.empty() || m_watches->HasAny();
-            if (hasPeriodicWork) {
-                m_pumpCv.wait_for(lock, period, [this] { return m_pumpStopRequested; });
+            if (!HasResolverWorkLocked()) {
+                m_resolverCv.wait(lock, [this] {
+                    return m_state != CVarSystemState::Running ||
+                        HasResolverWorkLocked();
+                });
             } else {
-                m_pumpCv.wait(lock, [this] {
-                    return m_pumpStopRequested || HasPendingLocked() ||
-                           !m_needsInitialScan.empty() || m_watches->HasAny();
+                m_resolverCv.wait_for(lock, period, [this] {
+                    return m_state != CVarSystemState::Running;
                 });
             }
-            if (m_pumpStopRequested) {
-                break;
+            if (m_state != CVarSystemState::Running) {
+                return;
             }
         }
 
         PerformInitialScan();
-        RetryPendingWrites();
-        if (const auto* module = GetOrFetchModule(); module && module->base != 0) {
+        if (const auto* module = GetOrFetchModule();
+            module && module->base != 0) {
             ResolvePendingCVars(*module);
         }
-        m_watches->Evaluate([this](std::wstring_view name) {
-            return ReadResolvedInt(name);
-        });
     }
 }
 
-void CVarSystem::StartPump(std::chrono::milliseconds period) {
+std::expected<void, std::string> CVarSystem::Start(
+    std::chrono::milliseconds period) {
     std::lock_guard lock(m_mutex);
-    if (m_pumpRunning) {
-        return;
+    if (m_state == CVarSystemState::Running) {
+        return {};
     }
-    m_pumpRunning = true;
-    m_pumpStopRequested = false;
-    m_pumpThread = std::thread([this, period] { PumpLoop(period); });
+    if (m_state != CVarSystemState::Stopped) {
+        return std::unexpected(
+            m_unavailableReason.empty()
+                ? "CVar system cannot start during its current lifecycle state"
+                : m_unavailableReason);
+    }
+    if (period <= std::chrono::milliseconds::zero()) {
+        return std::unexpected("CVar resolver period must be positive");
+    }
+    m_state = CVarSystemState::Running;
+    m_gameThreadReady = false;
+    m_gameSettingsReady = false;
+    m_watchBarrierOpened = false;
+    m_unavailableReason.clear();
+    m_nextWatchEvaluation = {};
+    try {
+        m_resolverThread = std::jthread([this, period] {
+            ResolverLoop(period);
+        });
+    } catch (const std::exception& error) {
+        m_state = CVarSystemState::Stopped;
+        return std::unexpected(std::format(
+            "failed to start the CVar resolver thread: {}",
+            error.what()));
+    } catch (...) {
+        m_state = CVarSystemState::Stopped;
+        return std::unexpected(
+            "failed to start the CVar resolver thread: unknown exception");
+    }
+    return {};
 }
 
-void CVarSystem::StopPump() {
-    bool shouldJoin = false;
+void CVarSystem::MarkUnavailable(std::string reason) {
     {
-        std::lock_guard lock(m_mutex);
-        if (m_pumpRunning) {
-            m_pumpStopRequested = true;
-            shouldJoin = true;
+        std::unique_lock lock(m_mutex);
+        if (m_state == CVarSystemState::Unavailable) {
+            return;
         }
+        m_state = CVarSystemState::Unavailable;
+        m_unavailableReason = std::move(reason);
+        m_resolverCv.notify_all();
+        m_stateCv.wait(lock, [this] {
+            return m_activeGameThreadPasses == 0;
+        });
+        FailAllCommandsLocked(m_unavailableReason);
+        m_needsInitialScan.clear();
     }
+    if (m_resolverThread.joinable()) {
+        m_resolverThread.join();
+    }
+    m_watches->Clear();
+    JST_LOG_ERROR("CVar system unavailable: {}", UnavailableReason());
+}
 
-    if (shouldJoin) {
-        m_pumpCv.notify_all();
-        if (m_pumpThread.joinable()) {
-            m_pumpThread.join();
+void CVarSystem::Stop() {
+    {
+        std::unique_lock lock(m_mutex);
+        if (m_state == CVarSystemState::Stopped) {
+            return;
         }
+        m_state = CVarSystemState::Stopping;
+        m_resolverCv.notify_all();
+        m_stateCv.wait(lock, [this] {
+            return m_activeGameThreadPasses == 0;
+        });
+        FailAllCommandsLocked("CVar system stopped");
     }
-
+    if (m_resolverThread.joinable()) {
+        m_resolverThread.join();
+    }
     m_watches->Clear();
     {
         std::lock_guard lock(m_mutex);
-        m_pumpRunning = false;
-        m_pumpStopRequested = false;
+        m_cache.clear();
+        m_managedClaims.clear();
+        m_needsInitialScan.clear();
+        m_module.reset();
+        m_gameThreadReady = false;
+        m_gameSettingsReady = false;
+        m_watchBarrierOpened = false;
+        m_state = CVarSystemState::Stopped;
     }
-    m_pumpCv.notify_all();
 }
 
 } // namespace jst::core

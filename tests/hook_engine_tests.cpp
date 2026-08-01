@@ -1,4 +1,5 @@
 #include "core/gateway_allocator.hpp"
+#include "core/detour_gate.hpp"
 #include "core/hook_engine.hpp"
 #include "core/instruction_relocator.hpp"
 #include "hooks/hook_context.hpp"
@@ -8,14 +9,45 @@
 #include <windows.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <iostream>
+#include <condition_variable>
+#include <future>
+#include <mutex>
 #include <string_view>
+#include <thread>
 #include <vector>
 
-int g_failures = 0;
+namespace jst::core {
+
+class HookEngineTestAccess final {
+public:
+    [[nodiscard]] static uint32_t InvalidateOriginalProtection(
+        HookEngine& engine,
+        std::string_view name) {
+        auto found = engine.m_hooks.find(name);
+        if (found == engine.m_hooks.end()) {
+            return 0;
+        }
+        const uint32_t previous = found->second.m_originalProtection;
+        found->second.m_originalProtection = 0;
+        return previous;
+    }
+
+    static void RestoreOriginalProtection(
+        HookEngine& engine,
+        std::string_view name,
+        uint32_t protection) {
+        auto found = engine.m_hooks.find(name);
+        if (found != engine.m_hooks.end()) {
+            found->second.m_originalProtection = protection;
+        }
+    }
+};
+
+} // namespace jst::core
 
 namespace {
 
@@ -44,7 +76,56 @@ const std::array<std::byte, 16> kLifecycleTarget{
     std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0xC3},
 };
 
-extern "C" __declspec(noinline) void TestDetour() {}
+__declspec(allocate(".testcode")) alignas(16)
+const std::array<std::byte, 16> kUnregisterFailureTarget{
+    std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
+    std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
+    std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
+    std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0xC3},
+};
+
+__declspec(allocate(".testcode")) alignas(16)
+const std::array<std::byte, 16> kGuardedArgumentsTarget{
+    std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
+    std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
+    std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
+    std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0xC3},
+};
+
+uint32_t g_testDetourCalls = 0;
+using TestTargetFn = void (*)();
+TestTargetFn g_testOriginal = nullptr;
+std::mutex g_testDetourMutex;
+std::condition_variable g_testDetourCv;
+bool g_testDetourShouldBlock = false;
+bool g_testDetourEntered = false;
+bool g_testDetourRelease = false;
+extern "C" __declspec(noinline) void TestDetour() {
+    ++g_testDetourCalls;
+    {
+        std::unique_lock lock(g_testDetourMutex);
+        if (g_testDetourShouldBlock) {
+            g_testDetourEntered = true;
+            g_testDetourCv.notify_all();
+            g_testDetourCv.wait(lock, [] { return g_testDetourRelease; });
+        }
+    }
+    if (g_testOriginal) {
+        g_testOriginal();
+    }
+}
+
+uintptr_t g_guardedObject = 0;
+float g_guardedFloat = 0.0f;
+uint32_t g_guardedSetBy = 0;
+extern "C" __declspec(noinline) void __fastcall GuardedArgumentsDetour(
+    uintptr_t object,
+    float value,
+    uint32_t setBy) {
+    g_guardedObject = object;
+    g_guardedFloat = value;
+    g_guardedSetBy = setBy;
+}
 
 uintptr_t ModuleRva(const void* address) {
     return reinterpret_cast<uintptr_t>(address) -
@@ -205,17 +286,50 @@ void TestAtomicPrepareFailure() {
 
 void TestInstallLifecycle() {
     const auto original = kLifecycleTarget;
+    const auto failureOriginal = kUnregisterFailureTarget;
     jst::core::HookEngine engine;
+    jst::core::DetourGate gate;
+    Check(gate.Open().has_value(), "guarded lifecycle gate opens");
     auto registered = engine.RegisterAddressHook(
         jst::core::HookSiteSpec{
             .name = "Lifecycle.Site",
             .group = "Lifecycle",
             .minimumOverwriteLength = 5,
-            .continuation = jst::core::HookContinuation::Resume,
+            .continuation = jst::core::HookContinuation::ReplayOriginal,
+            .detourGate = &gate,
         },
         ModuleRva(kLifecycleTarget.data()),
         reinterpret_cast<uintptr_t>(&TestDetour));
     Check(registered.has_value(), "lifecycle hook must register");
+    auto failureRegistered = engine.RegisterAddressHook(
+        jst::core::HookSiteSpec{
+            .name = "Lifecycle.UnregisterFailure",
+            .group = "LifecycleFailure",
+            .minimumOverwriteLength = 5,
+            .continuation = jst::core::HookContinuation::Resume,
+        },
+        ModuleRva(kUnregisterFailureTarget.data()),
+        reinterpret_cast<uintptr_t>(&TestDetour));
+    Check(failureRegistered.has_value(),
+          "unregister-failure sentinel hook must register");
+    auto argumentsRegistered = engine.RegisterAddressHook(
+        jst::core::HookSiteSpec{
+            .name = "Lifecycle.GuardedArguments",
+            .group = "LifecycleArguments",
+            .minimumOverwriteLength = 5,
+            .continuation = jst::core::HookContinuation::Resume,
+            .detourGate = &gate,
+        },
+        ModuleRva(kGuardedArgumentsTarget.data()),
+        reinterpret_cast<uintptr_t>(&GuardedArgumentsDetour));
+    Check(argumentsRegistered.has_value(),
+          "guarded register-argument hook must register");
+    const auto continuation = engine.GetContinuationAddress("Lifecycle.Site");
+    Check(continuation && *continuation != 0,
+          "guarded replay hook publishes its original trampoline");
+    g_testOriginal = continuation
+        ? reinterpret_cast<TestTargetFn>(*continuation)
+        : nullptr;
 
     auto installErrors = engine.InstallAll();
     Check(installErrors.empty() && engine.IsGroupInstalled("Lifecycle"),
@@ -223,13 +337,80 @@ void TestInstallLifecycle() {
     Check(ReadCodeByte(kLifecycleTarget.data()) == std::byte{0xE9},
           "installed splice must start with a relative jump");
 
+    const auto invokeTarget =
+        reinterpret_cast<TestTargetFn>(
+            const_cast<std::byte*>(kLifecycleTarget.data()));
+    g_testDetourCalls = 0;
+    invokeTarget();
+    Check(g_testDetourCalls == 1 && gate.ActiveCountForTests() == 0,
+          "open guarded gateway calls the detour and releases activity");
+    using ArgumentsTargetFn = void (*)(uintptr_t, float, uint32_t);
+    const auto invokeArguments = reinterpret_cast<ArgumentsTargetFn>(
+        const_cast<std::byte*>(kGuardedArgumentsTarget.data()));
+    invokeArguments(0x12345678u, 61.5f, 0x01000040u);
+    Check(g_guardedObject == 0x12345678u &&
+              g_guardedFloat == 61.5f &&
+              g_guardedSetBy == 0x01000040u,
+          "guarded gateway preserves integer and floating register arguments");
+
+    {
+        std::lock_guard lock(g_testDetourMutex);
+        g_testDetourShouldBlock = true;
+        g_testDetourEntered = false;
+        g_testDetourRelease = false;
+    }
+    std::thread activeCall(invokeTarget);
+    {
+        std::unique_lock lock(g_testDetourMutex);
+        g_testDetourCv.wait(lock, [] { return g_testDetourEntered; });
+    }
+    gate.Close();
+    std::promise<void> idleReturned;
+    auto idleReturnedFuture = idleReturned.get_future();
+    std::thread idleWaiter([&] {
+        gate.WaitForIdle();
+        idleReturned.set_value();
+    });
+    Check(idleReturnedFuture.wait_for(std::chrono::milliseconds(20)) ==
+              std::future_status::timeout,
+          "closed gate waits for a call admitted before shutdown");
+
+    // A call arriving after Close bypasses immediately even while an older
+    // admitted call is still inside the detour.
+    invokeTarget();
+    Check(g_testDetourCalls == 2 && gate.ActiveCountForTests() == 1,
+          "closed guarded gateway bypasses DLL code through original continuation");
+    {
+        std::lock_guard lock(g_testDetourMutex);
+        g_testDetourRelease = true;
+    }
+    g_testDetourCv.notify_all();
+    activeCall.join();
+    idleWaiter.join();
+    Check(idleReturnedFuture.wait_for(std::chrono::seconds(2)) ==
+              std::future_status::ready &&
+              gate.ActiveCountForTests() == 0,
+          "guarded gateway publishes idle only after admitted DLL code exits");
+    {
+        std::lock_guard lock(g_testDetourMutex);
+        g_testDetourShouldBlock = false;
+    }
+    Check(gate.Open().has_value(), "idle guarded gate can reopen before reinstall");
+
     MEMORY_BASIC_INFORMATION info{};
     VirtualQuery(kLifecycleTarget.data(), &info, sizeof(info));
     Check((info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0,
           "splice-site execute protection must be restored");
 
-    Check(engine.InstallAll().empty(), "repeated install must be idempotent");
+    const auto repeatedInstallErrors = engine.InstallAll();
+    Check(
+        repeatedInstallErrors.empty(),
+        repeatedInstallErrors.empty()
+            ? "repeated install must be idempotent"
+            : std::format(
+                  "repeated install failed: {}",
+                  repeatedInstallErrors.front().message));
     engine.UninstallAll();
     Check(CodeEquals(kLifecycleTarget, original),
           "uninstall must restore original bytes");
@@ -237,13 +418,42 @@ void TestInstallLifecycle() {
 
     Check(engine.InstallAll().empty() && engine.IsGroupInstalled("Lifecycle"),
           "prepared hook must support reinstall after uninstall");
+    invokeTarget();
+    Check(g_testDetourCalls == 3,
+          "reinstalled guarded hook admits calls after reopening");
 
     auto secondSeal = jst::core::SealGatewayArena();
     Check(secondSeal.has_value(), "second arena seal must be idempotent");
 
-    engine.UninstallAll();
+    const uint32_t savedProtection =
+        jst::core::HookEngineTestAccess::InvalidateOriginalProtection(
+            engine,
+            "Lifecycle.UnregisterFailure");
+    const auto failedUnregister =
+        engine.UnregisterHook("Lifecycle.UnregisterFailure");
+    Check(!failedUnregister &&
+              engine.IsHookInstalled("Lifecycle.UnregisterFailure") &&
+              engine.GetContinuationAddress("Lifecycle.UnregisterFailure"),
+          "failed unregister preserves the installed hook and its retry state");
+    jst::core::HookEngineTestAccess::RestoreOriginalProtection(
+        engine,
+        "Lifecycle.UnregisterFailure",
+        savedProtection);
+    Check(engine.UnregisterHook("Lifecycle.UnregisterFailure").has_value() &&
+              CodeEquals(kUnregisterFailureTarget, failureOriginal),
+          "unregister retry succeeds after the write precondition is restored");
+
+    gate.Close();
+    Check(engine.UnregisterHook("Lifecycle.GuardedArguments").has_value(),
+          "guarded argument hook unregisters cleanly");
+    const auto unregistered = engine.UnregisterHook("Lifecycle.Site");
+    Check(unregistered.has_value(), "guarded hook unregisters without losing errors");
+    gate.WaitForIdle();
     Check(CodeEquals(kLifecycleTarget, original),
-          "final uninstall must restore original bytes");
+          "guarded unregister restores original bytes");
+    Check(engine.UnregisterHook("Lifecycle.Site").has_value(),
+          "guarded unregister is idempotent");
+    g_testOriginal = nullptr;
 }
 
 class MultiContextTweak final : public jst::tweaks::HookTweak {
@@ -312,35 +522,11 @@ void TestMixedContinuationGroup() {
 
 } // namespace
 
-void TestSliderUtils();                 // slider_utils_tests.cpp
-void TestRuntimeControls();             // runtime_control_tests.cpp
-void TestStreamingPoolController();     // streaming_pool_controller_tests.cpp
-void TestPoolSizeSetting();             // pool_size_setting_tests.cpp
-void TestCVarWatch();                   // cvar_watch_tests.cpp
-void TestGraphicsAdapterService();       // graphics_adapter_service_tests.cpp
-void TestImportAddressHook();            // import_address_hook_tests.cpp
-void TestPeImports();                    // pe_imports_tests.cpp
-
-int main() {
+void TestHookEngine() {
     TestInstructionWindows();
     TestRelocation();
     TestMultiContextMultiplier();
-    TestStreamingPoolController();
-    TestPoolSizeSetting();
-    TestGraphicsAdapterService();
-    TestPeImports();
-    TestImportAddressHook();
-    TestCVarWatch();
-    TestSliderUtils();
-    TestRuntimeControls();
     TestMixedContinuationGroup();
     TestAtomicPrepareFailure();
     TestInstallLifecycle();
-
-    if (g_failures != 0) {
-        std::cerr << g_failures << " test(s) failed\n";
-        return 1;
-    }
-    std::cout << "All tests passed\n";
-    return 0;
 }

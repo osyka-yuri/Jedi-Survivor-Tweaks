@@ -30,13 +30,45 @@ enum class RuntimeControlResetResult : uint8_t {
     Changed,
 };
 
+enum class RuntimeEditState : uint8_t {
+    Unchanged,
+    Applied,
+    Queued,
+    Rejected,
+};
+
+struct RuntimeEditResult {
+    RuntimeEditState state = RuntimeEditState::Unchanged;
+    std::string diagnostic;
+
+    [[nodiscard]] bool ShouldPersist() const noexcept {
+        return state == RuntimeEditState::Applied ||
+            state == RuntimeEditState::Queued;
+    }
+};
+
+[[nodiscard]] inline RuntimeEditResult AppliedEdit() {
+    return RuntimeEditResult{.state = RuntimeEditState::Applied};
+}
+
+[[nodiscard]] inline RuntimeEditResult QueuedEdit() {
+    return RuntimeEditResult{.state = RuntimeEditState::Queued};
+}
+
+[[nodiscard]] inline RuntimeEditResult RejectedEdit(std::string diagnostic) {
+    return RuntimeEditResult{
+        .state = RuntimeEditState::Rejected,
+        .diagnostic = std::move(diagnostic),
+    };
+}
+
 // All string_view fields must point at literals or tweak-owned storage that
 // outlives the ephemeral control vector returned for the current frame.
 struct SliderFloatControl {
     std::string_view label;
     FloatSliderSpec spec;
     float current = 0.0f;
-    std::function<void(float)> apply;
+    std::function<RuntimeEditResult(float)> apply;
     ControlPersistence persistence;
     std::string_view tooltip;
 };
@@ -44,7 +76,7 @@ struct SliderFloatControl {
 [[nodiscard]] inline SliderFloatControl MakeSliderFloatControl(
     FloatSliderSpec spec,
     float current,
-    std::function<void(float)> apply,
+    std::function<RuntimeEditResult(float)> apply,
     std::string_view label,
     std::string_view configSection,
     std::string_view configKey,
@@ -63,15 +95,16 @@ struct SliderFloatControl {
     };
 }
 
-[[nodiscard]] inline bool TryCommitSliderEdit(
+[[nodiscard]] inline RuntimeEditResult TryCommitSliderEdit(
     SliderFloatControl& control, float rawValue, float persistedBaseline) {
     const float normalized = NormalizeFloatSlider(rawValue, control.spec);
-    control.current = normalized;
     if (SliderValuesNearlyEqual(normalized, persistedBaseline)) {
-        return false;
+        control.current = persistedBaseline;
+        return {};
     }
-    control.apply(control.current);
-    return true;
+    auto result = control.apply(normalized);
+    control.current = result.ShouldPersist() ? normalized : persistedBaseline;
+    return result;
 }
 
 inline void RestoreSliderBaseline(
@@ -83,7 +116,7 @@ struct CheckboxControl {
     std::string_view label;
     bool current = false;
     bool defaultValue = false;
-    std::function<void(bool)> apply;
+    std::function<RuntimeEditResult(bool)> apply;
     ControlPersistence persistence;
     std::string_view tooltip;
 };

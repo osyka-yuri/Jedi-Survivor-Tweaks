@@ -1,51 +1,37 @@
 #pragma once
 
-#include <cstdint>
-#include <optional>
-#include <string>
+#include "cvar_layout.hpp"
+#include "cvar_name.hpp"
+
+#include <array>
 #include <string_view>
-#include <unordered_map>
 
 namespace jst::core {
 
 struct CVarOverride {
-    bool bypassObjectValidation = false;
-    std::optional<int32_t>   valueOffset;
-    std::optional<uintptr_t> knownGlobalPtrRva;
+    std::wstring_view name;
+    CVarReadLayout readLayout{};
 };
 
-// Transparent hash for std::wstring keys that also accepts std::wstring_view
-// lookups without allocating a temporary string.
-struct WStringHash {
-    using is_transparent = void;
-    [[nodiscard]] size_t operator()(std::wstring_view sv) const noexcept {
-        return std::hash<std::wstring_view>{}(sv);
-    }
-    [[nodiscard]] size_t operator()(const std::wstring& s) const noexcept {
-        return std::hash<std::wstring_view>{}(s);
-    }
-};
+inline constexpr std::array<CVarOverride, 1> kCVarOverrides{{
+    CVarOverride{
+        .name = L"respawn.InterpolatedRendering",
+        .readLayout = CVarReadLayout{
+            .kind = CVarStorageKind::Inline,
+            .valueOffset = 0x50,
+        },
+    },
+}};
 
-class CVarOverrideTable {
-public:
-    [[nodiscard]] static CVarOverrideTable& Instance() {
-        static CVarOverrideTable table;
-        return table;
+[[nodiscard]] inline const CVarOverride* FindCVarOverride(
+    std::wstring_view name) noexcept {
+    const CVarNameEqual equal;
+    for (const auto& entry : kCVarOverrides) {
+        if (equal(entry.name, name)) {
+            return &entry;
+        }
     }
-
-    // Heterogeneous lookup: accepts wstring_view without allocating a temporary.
-    [[nodiscard]] const CVarOverride* Find(std::wstring_view name) const {
-        auto it = m_overrides.find(name);
-        return (it != m_overrides.end()) ? &it->second : nullptr;
-    }
-
-private:
-    CVarOverrideTable() {
-        m_overrides.emplace(L"respawn.InterpolatedRendering",
-            CVarOverride{.bypassObjectValidation = true, .valueOffset = 0x50});
-    }
-
-    std::unordered_map<std::wstring, CVarOverride, WStringHash, std::equal_to<>> m_overrides;
-};
+    return nullptr;
+}
 
 } // namespace jst::core

@@ -11,16 +11,12 @@
 #include "main_app.hpp"
 #include "core/config.hpp"
 #include "core/debounce_timer.hpp"
+#include "core/logging.hpp"
 #include "tweaks/runtime_control.hpp"
 #include "tweaks/tweak.hpp"
 
-#pragma warning(push)
-#pragma warning(disable: 4100)
-#pragma warning(disable: 4127)
-#pragma warning(disable: 4324)
-#include <external/reshade/imgui_compat.hpp>
-#include <external/reshade/reshade.hpp>
-#pragma warning(pop)
+#include <reshade/imgui_compat.hpp>
+#include <reshade/reshade.hpp>
 
 #include <algorithm>
 
@@ -49,21 +45,36 @@ void DrawOverlay(::reshade::api::effect_runtime* /*runtime*/) {
     }
 
     auto& tm = app->GetTweakManager();
-    auto& rc = app->GetConfigMutable();
+    auto& rc = app->GetConfig();
 
     static jst::core::DebounceTimer debounce(kSaveDebounceMs);
     bool anyChanged = false;
 
-    tm.IterateTweaks([&anyChanged, &rc](jst::tweaks::ITweak& tw) {
+    tm.IterateTweaks([&anyChanged, &rc](
+        jst::tweaks::ITweak& tw,
+        const jst::tweaks::TweakStatus& status) {
         auto controls = tw.GetRuntimeControls();
         if (controls.empty()) return;
 
         const std::string_view nm = tw.Name();
         ImGui::PushID(nm.data(), nm.data() + nm.size());
 
-        const bool initOk = tw.IsInitialized();
-        const ImVec4 dotColor = initOk ? ImVec4(0.25f, 0.85f, 0.35f, 1.0f)
-                                       : ImVec4(0.85f, 0.25f, 0.25f, 1.0f);
+        const auto runtimeStatus = tw.RuntimeStatus();
+        const bool failed = status.stage == jst::tweaks::TweakStage::Failed ||
+            (runtimeStatus && runtimeStatus->state ==
+                jst::tweaks::TweakRuntimeState::Failed);
+        const bool pending = runtimeStatus && runtimeStatus->state ==
+            jst::tweaks::TweakRuntimeState::Pending;
+        const bool inactive = runtimeStatus
+            ? runtimeStatus->state == jst::tweaks::TweakRuntimeState::Inactive
+            : status.stage == jst::tweaks::TweakStage::Disabled;
+        const ImVec4 dotColor = failed
+            ? ImVec4(0.85f, 0.25f, 0.25f, 1.0f)
+            : pending
+                ? ImVec4(0.95f, 0.70f, 0.20f, 1.0f)
+                : inactive
+                    ? ImVec4(0.55f, 0.55f, 0.55f, 1.0f)
+                    : ImVec4(0.25f, 0.85f, 0.35f, 1.0f);
 
         TextSv(tw.Name());
         ImGui::SameLine(0.0f, 6.0f);
@@ -86,14 +97,31 @@ void DrawOverlay(::reshade::api::effect_runtime* /*runtime*/) {
             ImGui::Spacing();
         }
 
+        const std::string_view statusMessage = !status.error.empty()
+            ? std::string_view(status.error)
+            : runtimeStatus && !runtimeStatus->message.empty()
+                ? std::string_view(runtimeStatus->message)
+                : std::string_view{};
+        if (!statusMessage.empty()) {
+            TextDisabledSv(statusMessage);
+            ImGui::Spacing();
+        }
+
         ImGui::Indent(kSectionIndent);
         const float labelWidth = overlay::ComputeLabelWidth(controls);
         int ctrlIdx = 0;
         for (auto& ctrl : controls) {
             ImGui::PushID(ctrlIdx++);
-            if (overlay::RenderControl(ctrl, labelWidth)) {
+            const auto edit = overlay::RenderControl(ctrl, labelWidth);
+            if (edit.ShouldPersist()) {
                 PersistControl(ctrl, rc);
                 anyChanged = true;
+            } else if (edit.state ==
+                       jst::tweaks::RuntimeEditState::Rejected) {
+                JST_LOG_WARNING(
+                    "Runtime edit for '{}' rejected: {}.",
+                    tw.Name(),
+                    edit.diagnostic);
             }
             ImGui::PopID();
             ImGui::Spacing();
@@ -109,7 +137,9 @@ void DrawOverlay(::reshade::api::effect_runtime* /*runtime*/) {
     ImGui::Spacing();
 
     if (ImGui::Button("Reset to Defaults", ImVec2(0, 0))) {
-        tm.IterateTweaks([&anyChanged, &rc](jst::tweaks::ITweak& tw) {
+        tm.IterateTweaks([&anyChanged, &rc](
+            jst::tweaks::ITweak& tw,
+            const jst::tweaks::TweakStatus&) {
             auto controls = tw.GetRuntimeControls();
             anyChanged = ResetTweakControls(tw, controls, rc) || anyChanged;
         });

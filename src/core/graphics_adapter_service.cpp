@@ -263,6 +263,7 @@ void GraphicsAdapterService::ProbeLoop() {
         result.snapshot.id = work.id;
         result.snapshot = MergeCapacityLocked(std::move(result.snapshot));
         m_completedProbeId = work.id;
+        m_probeCv.notify_all();
         if (m_snapshot == result.snapshot) {
             continue;
         }

@@ -18,14 +18,6 @@ constexpr int32_t kOffset = 0x6;
 constexpr std::wstring_view kPoolSizeCVar = L"r.Streaming.PoolSize";
 constexpr std::chrono::milliseconds kAutoWatchTimeout{30'000};
 
-[[nodiscard]] jst::tweaks::PoolSizeSetting LoadPoolSizeSetting(
-    const jst::core::Config& config, std::string_view section) {
-    return jst::tweaks::ParsePoolSizeGb(config.GetString(
-        section,
-        jst::tweaks::kPoolSizeGbConfigKey,
-        jst::tweaks::kPoolSizeAutoLiteral));
-}
-
 } // namespace
 
 namespace jst::tweaks {
@@ -40,8 +32,18 @@ StreamingPoolFix::StreamingPoolFix()
           reinterpret_cast<std::uintptr_t>(&StreamingPoolFix_Detour),
           jst::hooks::Slot::StreamingPoolFix) {}
 
-void StreamingPoolFix::OnConfigLoaded(jst::core::Config& config) {
-    m_setting = LoadPoolSizeSetting(config, Name());
+void StreamingPoolFix::OnConfigLoaded(const jst::core::Config& config) {
+    const std::string raw = config.GetString(
+        Name(), kPoolSizeGbConfigKey, kPoolSizeAutoLiteral);
+    m_setting = ParsePoolSizeGb(raw);
+    if (!IsPoolSizeAutoLiteral(raw) && m_setting.IsAuto()) {
+        JST_LOG_WARNING(
+            "Invalid [{}] {}='{}'; using '{}'.",
+            Name(),
+            kPoolSizeGbConfigKey,
+            raw,
+            kPoolSizeAutoLiteral);
+    }
 }
 
 void StreamingPoolFix::WritePoolSizeGb(jst::core::Config& config) const {
@@ -151,7 +153,10 @@ void StreamingPoolFix::StartEngineWatch() {
 
     m_engineWatch = jst::core::CVarSystem::Instance().WatchInt(std::move(request));
     if (!m_engineWatch) {
-        JST_LOG_WARNING("StreamingPoolFix | auto: failed to start engine pool watch");
+        JST_LOG_WARNING(
+            "StreamingPoolFix | auto: engine CVar watch unavailable; "
+            "using path sample or fallback");
+        OnEngineWatchTimeout();
     }
 }
 
@@ -187,13 +192,17 @@ StreamingPoolFix::FinalizeInstallation(jst::core::HookEngine& hooks) {
     if (!result) {
         return result;
     }
+    jst::core::CVarSystem::Instance().ClaimManaged(kPoolSizeCVar);
 
     auto& adapterService = jst::core::GraphicsAdapterService::Instance();
+    const auto adapterSnapshot = adapterService.Snapshot();
     (void)m_controller.UpdatePolicy(
-        MakePoolSizePolicy(adapterService.Snapshot().dedicatedVideoMemoryBytes));
+        MakePoolSizePolicy(adapterSnapshot.dedicatedVideoMemoryBytes));
     m_controller.BindPayload(PrimaryContext().streamingPool);
     ApplySetting();
-    LogPolicy(m_controller.Snapshot());
+    if (adapterSnapshot.HasDedicatedVideoMemory()) {
+        LogPolicy(m_controller.Snapshot());
+    }
 
     m_adapterSubscription = adapterService.Subscribe(
         [this](const jst::core::GraphicsAdapterSnapshot& snapshot) {
@@ -222,7 +231,7 @@ RuntimeControlResetResult StreamingPoolFix::ResetRuntimeControls(
         changed = true;
     }
 
-    if (IsInitialized()) {
+    if (IsEffectActive()) {
         // Composite reset is a deliberate re-arm even when values were already
         // defaults, so its watch and timeout restart from a known state.
         ApplySetting();
@@ -239,12 +248,13 @@ RuntimeControl StreamingPoolFix::MakeAutoCheckbox(std::string_view section) {
         .defaultValue = true,
         .apply = [this](bool value) {
             if (m_setting.IsAuto() == value) {
-                return;
+                return RuntimeEditResult{};
             }
             m_setting.mode = value ? PoolSizeMode::Auto : PoolSizeMode::Manual;
-            if (IsInitialized()) {
+            if (IsEffectActive()) {
                 ApplySetting();
             }
+            return AppliedEdit();
         },
         .persistence = ControlPersistence{
             .section = section,
@@ -271,6 +281,7 @@ RuntimeControl StreamingPoolFix::MakeManualSlider(std::string_view section) {
             m_setting.mode = PoolSizeMode::Manual;
             (void)m_controller.UpdateManualSize(value);
             JST_LOG_INFO("StreamingPoolFix | manual: {:.1f} GB", value);
+            return AppliedEdit();
         },
         "Pool Size (GB)",
         section,
@@ -289,7 +300,7 @@ std::vector<RuntimeControl> StreamingPoolFix::GetRuntimeControls() {
     const auto section = Name();
     controls.push_back(MakeAutoCheckbox(section));
 
-    if (!IsInitialized()) {
+    if (!IsEffectActive()) {
         return controls;
     }
     controls.push_back(LabelControl{.label = "Status"});

@@ -20,7 +20,9 @@ using jst::core::MakeError;
 namespace {
 
 constexpr size_t kArenaSize   = 64 * 1024;
-constexpr size_t kGatewaySize = 64;
+// A guarded returning-call gateway needs room for admission acquisition,
+// detour invocation, activity release/wakeup, and the closed-gate bypass.
+constexpr size_t kGatewaySize = 128;
 
 struct GatewayArenaState {
     std::byte* base = nullptr;

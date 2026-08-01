@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <future>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -214,10 +215,20 @@ void TestGraphicsAdapterService() {
             .id = gameId,
             .dedicatedVideoMemoryBytes = 16ull << 30,
         };
+        std::promise<void> publicationStarted;
+        std::promise<void> publicationReturned;
+        auto publicationStartedFuture = publicationStarted.get_future();
+        auto publicationFuture = publicationReturned.get_future();
         std::thread orderedPublisher([&] {
+            publicationStarted.set_value();
             GraphicsAdapterServiceTestAccess::ApplyCandidate(service, newer);
+            publicationReturned.set_value();
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        Check(publicationStartedFuture.wait_for(std::chrono::seconds{2}) ==
+                  std::future_status::ready &&
+                  publicationFuture.wait_for(std::chrono::milliseconds{20}) ==
+                      std::future_status::timeout,
+              "racing publication waits for initial callback serialization");
         {
             std::lock_guard lock(orderMutex);
             releaseInitial = true;
@@ -266,7 +277,6 @@ void TestGraphicsAdapterService() {
     std::condition_variable cv;
     bool entered = false;
     bool release = false;
-    std::atomic<bool> resetReturned{false};
     auto slow = service.Subscribe([&](const GraphicsAdapterSnapshot& snapshot) {
         if (snapshot.dedicatedVideoMemoryBytes != (8ull << 30)) {
             return;
@@ -288,12 +298,19 @@ void TestGraphicsAdapterService() {
         Check(cv.wait_for(lock, std::chrono::seconds{2}, [&] { return entered; }),
               "adapter callback entered before unsubscribe barrier");
     }
+    std::promise<void> resetStarted;
+    std::promise<void> resetReturned;
+    auto resetStartedFuture = resetStarted.get_future();
+    auto resetFuture = resetReturned.get_future();
     std::thread resetter([&] {
+        resetStarted.set_value();
         slow.Reset();
-        resetReturned.store(true, std::memory_order_release);
+        resetReturned.set_value();
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds{20});
-    Check(!resetReturned.load(std::memory_order_acquire),
+    Check(resetStartedFuture.wait_for(std::chrono::seconds{2}) ==
+              std::future_status::ready &&
+              resetFuture.wait_for(std::chrono::milliseconds{20}) ==
+                  std::future_status::timeout,
           "unsubscribe waits for an in-flight callback");
     {
         std::lock_guard lock(mutex);
@@ -302,7 +319,8 @@ void TestGraphicsAdapterService() {
     cv.notify_all();
     publisher.join();
     resetter.join();
-    Check(resetReturned.load(std::memory_order_acquire),
+    Check(resetFuture.wait_for(std::chrono::seconds{2}) ==
+              std::future_status::ready,
           "unsubscribe returns after the callback finishes");
     slow.Reset();
 
@@ -393,12 +411,9 @@ void TestGraphicsAdapterService() {
             });
 
         service.ReportAdapterId(sourceId);
-        for (int attempt = 0;
-             attempt < 200 &&
-             !GraphicsAdapterServiceTestAccess::HasCompletedProbe(service, sourceId);
-             ++attempt) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{5});
-        }
+        Check(GraphicsAdapterServiceTestAccess::WaitForCompletedProbe(
+                  service, sourceId, std::chrono::seconds{2}),
+              "source adapter probe completes within the bounded wait");
         Check(service.Snapshot() == GraphicsAdapterSnapshot{
                   .id = sourceId,
                   .dedicatedVideoMemoryBytes = 24ull << 30,
@@ -411,12 +426,9 @@ void TestGraphicsAdapterService() {
                   .dedicatedVideoMemoryBytes = 24ull << 30,
               },
               "identity change synchronously retains source capacity");
-        for (int attempt = 0;
-             attempt < 200 &&
-             !GraphicsAdapterServiceTestAccess::HasCompletedProbe(service, weakerId);
-             ++attempt) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{5});
-        }
+        Check(GraphicsAdapterServiceTestAccess::WaitForCompletedProbe(
+                  service, weakerId, std::chrono::seconds{2}),
+              "weaker adapter probe completes within the bounded wait");
         Check(service.Snapshot() == GraphicsAdapterSnapshot{
                   .id = weakerId,
                   .dedicatedVideoMemoryBytes = 24ull << 30,
@@ -491,16 +503,11 @@ void TestGraphicsAdapterService() {
         }
         probeCv.notify_all();
 
-        bool newPublished = false;
-        for (int attempt = 0; attempt < 200; ++attempt) {
-            const auto snapshot = service.Snapshot();
-            if (snapshot.id == newId &&
-                snapshot.dedicatedVideoMemoryBytes == (8ull << 30)) {
-                newPublished = true;
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds{5});
-        }
+        const bool newPublished =
+            GraphicsAdapterServiceTestAccess::WaitForCompletedProbe(
+                service, newId, std::chrono::seconds{2}) &&
+            service.Snapshot().id == newId &&
+            service.Snapshot().dedicatedVideoMemoryBytes == (8ull << 30);
         Check(newPublished && oldCalls.load(std::memory_order_relaxed) == 1 &&
                   newCalls.load(std::memory_order_relaxed) == 1,
               "new LUID wins and stale probe capacity is discarded");
@@ -510,24 +517,38 @@ void TestGraphicsAdapterService() {
     // public snapshot intentionally contains no dedicated-memory value.
     {
         GraphicsAdapterServiceTestAccess::Reset(service);
-        std::atomic<int> probeCalls{0};
+        std::mutex completionMutex;
+        std::condition_variable completionCv;
+        int probeCalls = 0;
         GraphicsAdapterServiceTestAccess::SetProbe(
             service,
             [&](GraphicsAdapterId id) -> std::optional<GraphicsAdapterSnapshot> {
-                probeCalls.fetch_add(1, std::memory_order_relaxed);
+                {
+                    std::lock_guard lock(completionMutex);
+                    ++probeCalls;
+                }
+                completionCv.notify_all();
                 return GraphicsAdapterSnapshot{.id = id};
             });
         service.ReportAdapterId(gameId);
-        for (int attempt = 0;
-             attempt < 200 && probeCalls.load(std::memory_order_relaxed) == 0;
-             ++attempt) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        {
+            std::unique_lock lock(completionMutex);
+            Check(completionCv.wait_for(
+                      lock,
+                      std::chrono::seconds{2},
+                      [&] { return probeCalls == 1; }),
+                  "no-dedicated probe completes within the bounded wait");
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds{150});
         service.ReportAdapterId(gameId);
-        std::this_thread::sleep_for(std::chrono::milliseconds{150});
-        Check(probeCalls.load(std::memory_order_relaxed) == 1,
-              "known no-dedicated result does not retry as a transient failure");
+        {
+            std::unique_lock lock(completionMutex);
+            const bool retried = completionCv.wait_for(
+                lock,
+                std::chrono::milliseconds{300},
+                [&] { return probeCalls > 1; });
+            Check(!retried && probeCalls == 1,
+                  "known no-dedicated result does not retry as a transient failure");
+        }
     }
 
     // Stop is a join barrier for an in-flight platform probe.
@@ -537,7 +558,10 @@ void TestGraphicsAdapterService() {
         std::condition_variable probeCv;
         bool probeEntered = false;
         bool releaseProbe = false;
-        std::atomic<bool> stopFinished{false};
+        std::promise<void> stopStarted;
+        std::promise<void> stopFinished;
+        auto stopStartedFuture = stopStarted.get_future();
+        auto stopFuture = stopFinished.get_future();
         GraphicsAdapterServiceTestAccess::SetProbe(
             service,
             [&](GraphicsAdapterId id) -> std::optional<GraphicsAdapterSnapshot> {
@@ -555,11 +579,14 @@ void TestGraphicsAdapterService() {
                   "adapter probe enters before Stop barrier");
         }
         std::thread stopper([&] {
+            stopStarted.set_value();
             service.Stop();
-            stopFinished.store(true, std::memory_order_release);
+            stopFinished.set_value();
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds{20});
-        Check(!stopFinished.load(std::memory_order_acquire),
+        Check(stopStartedFuture.wait_for(std::chrono::seconds{2}) ==
+                  std::future_status::ready &&
+                  stopFuture.wait_for(std::chrono::milliseconds{20}) ==
+                      std::future_status::timeout,
               "GraphicsAdapterService::Stop waits for in-flight probe");
         {
             std::lock_guard lock(probeMutex);
@@ -567,7 +594,8 @@ void TestGraphicsAdapterService() {
         }
         probeCv.notify_all();
         stopper.join();
-        Check(stopFinished.load(std::memory_order_acquire),
+        Check(stopFuture.wait_for(std::chrono::seconds{2}) ==
+                  std::future_status::ready,
               "GraphicsAdapterService::Stop returns after probe completion");
     }
 

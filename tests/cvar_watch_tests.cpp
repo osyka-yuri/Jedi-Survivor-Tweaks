@@ -1,449 +1,451 @@
 #include "core/cvar_system.hpp"
-#include "core/cvar_layout.hpp"
-#include "core/cvar_resolver.hpp"
+#include "core/cvar_watch_registry.hpp"
 #include "cvar_system_test_access.hpp"
+#include "cvar_test_fakes.hpp"
+#include "cvar_watch_subscription_test_access.hpp"
 #include "test_check.hpp"
 
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <future>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
 
+namespace {
+
 using jst::core::CVarSystem;
 using jst::core::CVarSystemTestAccess;
 using jst::core::CVarWatchDecision;
-using jst::core::CVarWatchSubscription;
 using jst::core::IntWatchRequest;
+using cvar_test::Bind;
+using cvar_test::FakeCVar;
+using cvar_test::FakeVTable;
 
-namespace {
-
-CVarSystem& Cvs() {
+CVarSystem& Cvars() {
     return CVarSystem::Instance();
 }
 
 IntWatchRequest Request(
     std::wstring name,
-    std::function<CVarWatchDecision(int32_t)> onValue) {
-    IntWatchRequest request;
-    request.name = std::move(name);
-    request.onValue = std::move(onValue);
-    request.timeout = std::chrono::seconds{5};
-    return request;
+    std::function<CVarWatchDecision(int32_t)> callback) {
+    return IntWatchRequest{
+        .name = std::move(name),
+        .onValue = std::move(callback),
+        .timeout = std::chrono::seconds(5),
+    };
+}
+
+bool Inject(
+    std::wstring_view name,
+    FakeCVar& object,
+    int32_t& value) {
+    return CVarSystemTestAccess::InjectResolved(
+        Cvars(),
+        name,
+        reinterpret_cast<uintptr_t>(&object),
+        reinterpret_cast<uintptr_t>(&cvar_test::FakeStringSetter),
+        reinterpret_cast<uintptr_t>(&value));
 }
 
 } // namespace
 
 void TestCVarWatch() {
-    // A CVar first requested after startup already carries a SetBy priority in
-    // its flags. It must resolve just like a constructor-priority object.
+    // Continue remains registered; Complete is removed. Callback execution is
+    // on the caller of the post-Tick pass, never the resolver thread.
     {
-        alignas(uintptr_t) std::array<uint8_t, 80> object{};
-        alignas(uintptr_t) uintptr_t vtableStorage = 0;
-        alignas(uintptr_t) uintptr_t globalPointer =
-            reinterpret_cast<uintptr_t>(object.data());
-        *reinterpret_cast<uintptr_t*>(object.data()) =
-            reinterpret_cast<uintptr_t>(&vtableStorage);
-        *reinterpret_cast<uint32_t*>(
-            object.data() + jst::core::cvar_layout::kFlagsOffset) = 0x03000040;
-        *reinterpret_cast<int32_t*>(
-            object.data() + jst::core::cvar_layout::kValueOffset) = 4000;
+        CVarSystemTestAccess::Reset(Cvars());
+        FakeVTable vtable;
+        FakeCVar object;
+        Bind(object, vtable);
+        int32_t value = -1;
+        Check(Inject(L"test.Decision", object, value),
+              "watch fake injection succeeds");
 
-        jst::core::ScanEntry scan;
-        scan.globalPtrCandidates.push_back(
-            reinterpret_cast<uintptr_t>(&globalPointer));
-        const auto resolved = jst::core::ResolveFromScan(
-            scan, jst::core::ModuleInfo{}, nullptr);
-        Check(resolved && resolved->writeAddr ==
-                  reinterpret_cast<uintptr_t>(object.data()) +
-                      jst::core::cvar_layout::kValueOffset,
-              "late CVar resolution accepts project-setting priority flags");
-
-        *reinterpret_cast<uint32_t*>(
-            object.data() + jst::core::cvar_layout::kFlagsOffset) = 0x0B000000;
-        Check(!jst::core::ResolveFromScan(scan, jst::core::ModuleInfo{}, nullptr),
-              "CVar resolution rejects an unknown priority above console");
-    }
-
-    // Direct primitive candidates must reject UTF-16 text fragments while
-    // retaining ordinary integer CVars.
-    {
-        alignas(IMAGE_NT_HEADERS) std::array<uint8_t, 0x500> image{};
-        const uintptr_t base = reinterpret_cast<uintptr_t>(image.data());
-        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
-        dos->e_magic = IMAGE_DOS_SIGNATURE;
-        dos->e_lfanew = 0x80;
-        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-        nt->Signature = IMAGE_NT_SIGNATURE;
-        nt->FileHeader.NumberOfSections = 1;
-        nt->FileHeader.SizeOfOptionalHeader = sizeof(nt->OptionalHeader);
-        auto* data = IMAGE_FIRST_SECTION(nt);
-        data->Name[0] = '.';
-        data->Name[1] = 'd';
-        data->Name[2] = 'a';
-        data->Name[3] = 't';
-        data->Name[4] = 'a';
-        data->VirtualAddress = 0x400;
-        data->Misc.VirtualSize = 0x100;
-
-        auto* storage = reinterpret_cast<uintptr_t*>(image.data() + 0x420);
-        *storage = 0x0072006F; // UTF-16 "or", previously accepted as a subnormal float.
-        jst::core::ScanEntry scan;
-        scan.refVarCandidates.push_back(reinterpret_cast<uintptr_t>(storage));
-        const jst::core::ModuleInfo module{base, image.size()};
-        Check(!jst::core::ResolveFromScan(scan, module, nullptr),
-              "UTF-16 text is not accepted as direct CVar storage");
-
-        *storage = 4000;
-        const auto resolved = jst::core::ResolveFromScan(scan, module, nullptr);
-        Check(resolved && resolved->writeAddr == reinterpret_cast<uintptr_t>(storage),
-              "ordinary integer direct CVar storage remains valid");
-    }
-
-    // Continue observes repeatedly; Complete removes the registry entry.
-    {
-        CVarSystemTestAccess::Reset(Cvs());
-        int32_t storage = -1;
         int calls = 0;
-        Check(CVarSystemTestAccess::InjectResolvedInt(Cvs(), L"test.Decision", &storage),
-              "inject resolved CVar for decisions");
+        std::thread::id callbackThread;
+        auto subscription = Cvars().WatchInt(Request(
+            L"TEST.decision",
+            [&](int32_t observed) {
+                ++calls;
+                callbackThread = std::this_thread::get_id();
+                return observed > 0
+                    ? CVarWatchDecision::Complete
+                    : CVarWatchDecision::Continue;
+            }));
+        Check(static_cast<bool>(subscription),
+              "valid watch returns move-only ownership");
 
-        auto subscription = Cvs().WatchInt(Request(L"test.Decision", [&](int32_t value) {
-            ++calls;
-            return value > 0 ? CVarWatchDecision::Complete
-                             : CVarWatchDecision::Continue;
-        }));
-        Check(static_cast<bool>(subscription), "valid request returns a subscription");
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(calls == 1, "Continue keeps the watch active");
-        storage = 42;
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(calls == 2, "Complete removes the watch after the winning value");
+        const auto gameThread = std::this_thread::get_id();
+        CVarSystemTestAccess::PumpOnce(Cvars());
+        value = 42;
+        CVarSystemTestAccess::PumpOnce(Cvars());
+        CVarSystemTestAccess::PumpOnce(Cvars());
+        Check(calls == 2,
+              "Continue observes again and Complete removes the watch");
+        Check(callbackThread == gameThread,
+              "watch callback runs on the post-Tick game thread");
+        Check(CVarSystemTestAccess::WatchEntryCount(Cvars()) == 0,
+              "completed watch is removed from the non-owning registry index");
     }
 
-    // Empty requests are rejected without creating ownership.
     {
-        CVarSystemTestAccess::Reset(Cvs());
-        Check(!Cvs().WatchInt({}), "empty watch request is rejected");
+        CVarSystemTestAccess::Reset(Cvars());
+        Check(!Cvars().WatchInt({}), "empty watch request is rejected");
         IntWatchRequest missingCallback;
         missingCallback.name = L"test.Empty";
-        Check(!Cvs().WatchInt(std::move(missingCallback)),
-              "watch without onValue is rejected");
+        Check(!Cvars().WatchInt(std::move(missingCallback)),
+              "watch without value callback is rejected");
+        auto negativeTimeout = Request(
+            L"test.NegativeTimeout",
+            [](int32_t) { return CVarWatchDecision::Complete; });
+        negativeTimeout.timeout = std::chrono::milliseconds(-1);
+        Check(!Cvars().WatchInt(std::move(negativeTimeout)),
+              "watch with a negative timeout is rejected");
     }
 
-    // Priority is abort -> timeout -> value.
+    // Startup time before the first completed engine Tick does not consume a
+    // watch timeout budget. The barrier rebases all pre-Tick deadlines.
     {
-        CVarSystemTestAccess::Reset(Cvs());
-        int32_t storage = 7;
-        Check(CVarSystemTestAccess::InjectResolvedInt(Cvs(), L"test.Priority", &storage),
-              "inject resolved CVar for priority");
-        int values = 0;
+        CVarSystemTestAccess::Reset(Cvars());
+        FakeVTable vtable;
+        FakeCVar object;
+        Bind(object, vtable);
+        int32_t value = 9;
+        Check(Inject(L"test.StartupDeadline", object, value),
+              "startup deadline fake injection succeeds");
+        int valueCalls = 0;
+        int timeouts = 0;
+        auto request = Request(L"test.StartupDeadline", [&](int32_t) {
+            ++valueCalls;
+            return CVarWatchDecision::Complete;
+        });
+        request.timeout = std::chrono::milliseconds(10);
+        request.onTimeout = [&] { ++timeouts; };
+        auto subscription = Cvars().WatchInt(std::move(request));
+        std::mutex delayMutex;
+        std::condition_variable delayCv;
+        std::unique_lock delayLock(delayMutex);
+        (void)delayCv.wait_for(delayLock, std::chrono::milliseconds(20));
+        CVarSystemTestAccess::PumpOnce(Cvars());
+        Check(valueCalls == 1 && timeouts == 0,
+              "pre-barrier startup time does not expire a watch");
+    }
+
+    // Abort has priority over timeout, and timeout has priority over reading.
+    {
+        CVarSystemTestAccess::Reset(Cvars());
+        FakeVTable vtable;
+        FakeCVar object;
+        Bind(object, vtable);
+        int32_t value = 7;
+        Check(Inject(L"test.Priority", object, value),
+              "priority fake injection succeeds");
+        int valueCalls = 0;
         int timeouts = 0;
 
         auto abortedRequest = Request(L"test.Priority", [&](int32_t) {
-            ++values;
+            ++valueCalls;
             return CVarWatchDecision::Complete;
         });
-        abortedRequest.timeout = std::chrono::milliseconds{0};
+        abortedRequest.timeout = std::chrono::milliseconds(0);
         abortedRequest.shouldAbort = [] { return true; };
         abortedRequest.onTimeout = [&] { ++timeouts; };
-        auto aborted = Cvs().WatchInt(std::move(abortedRequest));
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(values == 0 && timeouts == 0, "abort completes silently before timeout/value");
+        auto aborted = Cvars().WatchInt(std::move(abortedRequest));
+        CVarSystemTestAccess::PumpOnce(Cvars());
+        Check(valueCalls == 0 && timeouts == 0,
+              "abort completes silently before timeout and value");
 
         auto timedRequest = Request(L"test.Priority", [&](int32_t) {
-            ++values;
+            ++valueCalls;
             return CVarWatchDecision::Complete;
         });
-        timedRequest.timeout = std::chrono::milliseconds{0};
+        timedRequest.timeout = std::chrono::milliseconds(0);
         timedRequest.onTimeout = [&] { ++timeouts; };
-        auto timed = Cvs().WatchInt(std::move(timedRequest));
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(timeouts == 1 && values == 0, "timeout wins over a ready value at deadline");
+        auto timed = Cvars().WatchInt(std::move(timedRequest));
+        CVarSystemTestAccess::PumpOnce(Cvars());
+        Check(valueCalls == 0 && timeouts == 1,
+              "timeout completes before any value callback");
     }
 
-    // Reset and destruction cancel before a callback can begin.
+    // User callbacks execute without registry/cache mutexes. They can enqueue
+    // a CVar and register another watch; both become visible next Tick.
     {
-        CVarSystemTestAccess::Reset(Cvs());
-        int32_t storage = 1;
-        int calls = 0;
-        Check(CVarSystemTestAccess::InjectResolvedInt(Cvs(), L"test.Cancel", &storage),
-              "inject resolved CVar for cancellation");
-        auto subscription = Cvs().WatchInt(Request(L"test.Cancel", [&](int32_t) {
-            ++calls;
+        CVarSystemTestAccess::Reset(Cvars());
+        FakeVTable firstTable;
+        FakeVTable secondTable;
+        FakeCVar firstObject;
+        FakeCVar secondObject;
+        Bind(firstObject, firstTable);
+        Bind(secondObject, secondTable);
+        int32_t firstValue = 1;
+        int32_t secondValue = 0;
+        secondObject.setterTarget = &secondValue;
+        Check(Inject(L"test.First", firstObject, firstValue) &&
+                  Inject(L"test.Second", secondObject, secondValue),
+              "reentrant watch fakes inject");
+
+        int nestedCalls = 0;
+        jst::core::CVarWatchSubscription nested;
+        auto first = Cvars().WatchInt(Request(L"test.First", [&](int32_t) {
+            (void)Cvars().SetInt(L"test.Second", 8);
+            nested = Cvars().WatchInt(Request(
+                L"test.Second",
+                [&](int32_t observed) {
+                    ++nestedCalls;
+                    return observed == 8
+                        ? CVarWatchDecision::Complete
+                        : CVarWatchDecision::Continue;
+                }));
             return CVarWatchDecision::Complete;
         }));
-        subscription.Reset();
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(calls == 0, "Reset prevents a future callback");
 
-        {
-            auto scoped = Cvs().WatchInt(Request(L"test.Cancel", [&](int32_t) {
-                ++calls;
+        CVarSystemTestAccess::PumpOnce(Cvars());
+        Check(secondValue == 0 && nestedCalls == 0,
+              "work enqueued by a callback waits for the next Tick snapshot");
+        CVarSystemTestAccess::PumpOnce(Cvars());
+        Check(secondValue == 8 && nestedCalls == 1,
+              "reentrant Set and Watch complete on the following Tick");
+    }
+
+    // One throwing callback is cancelled without preventing later watches.
+    {
+        CVarSystemTestAccess::Reset(Cvars());
+        FakeVTable vtable;
+        FakeCVar object;
+        Bind(object, vtable);
+        int32_t value = 5;
+        Check(Inject(L"test.Exceptions", object, value),
+              "exception fake injection succeeds");
+        int survivorCalls = 0;
+        auto throwing = Cvars().WatchInt(Request(
+            L"test.Exceptions",
+            [](int32_t) -> CVarWatchDecision {
+                throw std::runtime_error("expected");
+            }));
+        auto survivor = Cvars().WatchInt(Request(
+            L"TEST.exceptions",
+            [&](int32_t) {
+                ++survivorCalls;
                 return CVarWatchDecision::Complete;
             }));
-        }
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(calls == 0, "destruction prevents a future callback");
+        CVarSystemTestAccess::PumpOnce(Cvars());
+        Check(survivorCalls == 1,
+              "callback exception is isolated from later watches");
     }
 
-    // Reset is a join barrier for an onValue already in flight.
+    // Reset remains a join barrier after a concurrent Clear has already
+    // detached the registry entry.
     {
-        CVarSystemTestAccess::Reset(Cvs());
-        int32_t storage = 9;
-        Check(CVarSystemTestAccess::InjectResolvedInt(Cvs(), L"test.Join", &storage),
-              "inject resolved CVar for reset barrier");
         std::mutex mutex;
         std::condition_variable cv;
         bool entered = false;
         bool release = false;
-        std::atomic<bool> callbackFinished{false};
-        std::atomic<bool> resetReturned{false};
+        jst::core::CVarWatchRegistry registry;
+        auto control = registry.Register(Request(
+            L"test.CancelBarrier",
+            [&](int32_t) {
+                std::unique_lock lock(mutex);
+                entered = true;
+                cv.notify_all();
+                cv.wait(lock, [&] { return release; });
+                return CVarWatchDecision::Complete;
+            }));
+        auto subscription =
+            jst::core::CVarWatchSubscriptionTestAccess::Make(control);
 
-        auto subscription = Cvs().WatchInt(Request(L"test.Join", [&](int32_t) {
-            std::unique_lock lock(mutex);
-            entered = true;
-            cv.notify_all();
-            cv.wait(lock, [&] { return release; });
-            callbackFinished.store(true, std::memory_order_release);
-            return CVarWatchDecision::Complete;
-        }));
-        Cvs().StartPump(std::chrono::milliseconds{1});
+        std::thread evaluator([&] {
+            registry.Evaluate([](std::wstring_view) {
+                return std::optional<int32_t>{1};
+            });
+        });
         {
             std::unique_lock lock(mutex);
-            Check(cv.wait_for(lock, std::chrono::seconds{2}, [&] { return entered; }),
-                  "onValue entered before barrier test");
+            cv.wait(lock, [&] { return entered; });
         }
+
+        std::promise<void> clearReturned;
+        auto clearReturnedFuture = clearReturned.get_future();
+        std::thread clearer([&] {
+            registry.Clear();
+            clearReturned.set_value();
+        });
+        Check(registry.WaitUntilAbsent(
+                  L"test.CancelBarrier",
+                  std::chrono::seconds(2)),
+              "Clear detaches the active watch before subscription reset");
+
+        std::promise<void> resetStarted;
+        std::promise<void> resetReturned;
+        auto resetStartedFuture = resetStarted.get_future();
+        auto resetReturnedFuture = resetReturned.get_future();
         std::thread resetter([&] {
+            resetStarted.set_value();
             subscription.Reset();
-            resetReturned.store(true, std::memory_order_release);
+            resetReturned.set_value();
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds{20});
-        Check(!resetReturned.load(std::memory_order_acquire),
-              "Reset waits for an in-flight onValue");
+        Check(resetStartedFuture.wait_for(std::chrono::seconds(2)) ==
+                  std::future_status::ready &&
+                  resetReturnedFuture.wait_for(std::chrono::milliseconds(20)) ==
+                      std::future_status::timeout,
+              "subscription Reset waits for its active callback");
+        Check(clearReturnedFuture.wait_for(std::chrono::milliseconds(20)) ==
+                  std::future_status::timeout,
+              "Clear waits for the detached active watch");
         {
             std::lock_guard lock(mutex);
             release = true;
         }
         cv.notify_all();
+        evaluator.join();
         resetter.join();
-        Check(callbackFinished.load(std::memory_order_acquire) &&
-                  resetReturned.load(std::memory_order_acquire),
-              "Reset returns only after onValue finishes");
-        Cvs().StopPump();
+        clearer.join();
+        Check(resetReturnedFuture.wait_for(std::chrono::seconds(2)) ==
+                  std::future_status::ready &&
+                  clearReturnedFuture.wait_for(std::chrono::seconds(2)) ==
+                      std::future_status::ready,
+              "both cancellation barriers return after callback completion");
     }
 
-    // Move-assignment joins/cancels the prior ownership and transfers the new one.
+    // The inverse ordering has the same join semantics: subscription Reset
+    // closes its control first, then a concurrent registry Clear retains that
+    // detached/inactive control until the callback exits.
     {
-        CVarSystemTestAccess::Reset(Cvs());
-        int32_t firstValue = 1;
-        int32_t secondValue = 2;
-        int firstCalls = 0;
-        int secondCalls = 0;
-        Check(CVarSystemTestAccess::InjectResolvedInt(Cvs(), L"test.MoveFirst", &firstValue),
-              "inject first move CVar");
-        Check(CVarSystemTestAccess::InjectResolvedInt(Cvs(), L"test.MoveSecond", &secondValue),
-              "inject second move CVar");
-        auto first = Cvs().WatchInt(Request(L"test.MoveFirst", [&](int32_t) {
-            ++firstCalls;
-            return CVarWatchDecision::Complete;
-        }));
-        auto second = Cvs().WatchInt(Request(L"test.MoveSecond", [&](int32_t) {
-            ++secondCalls;
-            return CVarWatchDecision::Complete;
-        }));
-        first = std::move(second);
-        Check(!second, "move assignment empties the source subscription");
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(firstCalls == 0 && secondCalls == 1,
-              "move assignment cancels old watch and retains new watch");
-    }
-
-    // Callback failures are isolated; a callback may safely use resolver APIs.
-    {
-        CVarSystemTestAccess::Reset(Cvs());
-        int32_t storage = 7;
-        int healthyCalls = 0;
-        Check(CVarSystemTestAccess::InjectResolvedInt(
-                  Cvs(), L"test.ExceptionIsolation", &storage),
-              "inject resolved CVar for exception isolation");
-        auto throwing = Cvs().WatchInt(Request(L"test.ExceptionIsolation", [](int32_t) -> CVarWatchDecision {
-            throw std::runtime_error("expected");
-        }));
-        auto healthy = Cvs().WatchInt(Request(L"test.ExceptionIsolation", [&](int32_t) {
-            ++healthyCalls;
-            Check(Cvs().SetInt(L"test.ExceptionIsolation", 8),
-                  "onValue may reenter resolved SetInt");
-            return CVarWatchDecision::Complete;
-        }));
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(healthyCalls == 1 && storage == 8,
-              "throwing watch does not stop a reentrant healthy watch");
-    }
-
-    // A callback may cancel a later subscription before that callback starts.
-    {
-        CVarSystemTestAccess::Reset(Cvs());
-        int32_t storage = 1;
-        Check(CVarSystemTestAccess::InjectResolvedInt(Cvs(), L"test.ReentrantCancel", &storage),
-              "inject resolved CVar for reentrant cancellation");
-        int firstCalls = 0;
-        int cancelledCalls = 0;
-        CVarWatchSubscription later;
-        auto first = Cvs().WatchInt(Request(L"test.ReentrantCancel", [&](int32_t) {
-            ++firstCalls;
-            later.Reset();
-            return CVarWatchDecision::Complete;
-        }));
-        later = Cvs().WatchInt(Request(L"test.ReentrantCancel", [&](int32_t) {
-            ++cancelledCalls;
-            return CVarWatchDecision::Complete;
-        }));
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(firstCalls == 1 && cancelledCalls == 0,
-              "reentrant cancellation suppresses a later callback without deadlock");
-    }
-
-    // StopPump is also a barrier and clears outstanding watches.
-    {
-        CVarSystemTestAccess::Reset(Cvs());
-        int32_t storage = 3;
-        Check(CVarSystemTestAccess::InjectResolvedInt(Cvs(), L"test.StopPump", &storage),
-              "inject resolved CVar for StopPump barrier");
         std::mutex mutex;
         std::condition_variable cv;
         bool entered = false;
         bool release = false;
-        std::atomic<bool> stopReturned{false};
-        auto subscription = Cvs().WatchInt(Request(L"test.StopPump", [&](int32_t) {
-            std::unique_lock lock(mutex);
-            entered = true;
-            cv.notify_all();
-            cv.wait(lock, [&] { return release; });
-            return CVarWatchDecision::Continue;
-        }));
-        Cvs().StartPump(std::chrono::milliseconds{1});
+        jst::core::CVarWatchRegistry registry;
+        auto control = registry.Register(Request(
+            L"test.ResetFirstBarrier",
+            [&](int32_t) {
+                std::unique_lock lock(mutex);
+                entered = true;
+                cv.notify_all();
+                cv.wait(lock, [&] { return release; });
+                return CVarWatchDecision::Complete;
+            }));
+        auto subscription =
+            jst::core::CVarWatchSubscriptionTestAccess::Make(control);
+
+        std::thread evaluator([&] {
+            registry.Evaluate([](std::wstring_view) {
+                return std::optional<int32_t>{1};
+            });
+        });
         {
             std::unique_lock lock(mutex);
-            Check(cv.wait_for(lock, std::chrono::seconds{2}, [&] { return entered; }),
-                  "callback entered before StopPump barrier");
+            cv.wait(lock, [&] { return entered; });
         }
-        std::thread stopper([&] {
-            Cvs().StopPump();
-            stopReturned.store(true, std::memory_order_release);
+
+        std::promise<void> resetStarted;
+        std::promise<void> resetReturned;
+        auto resetStartedFuture = resetStarted.get_future();
+        auto resetReturnedFuture = resetReturned.get_future();
+        std::thread resetter([&] {
+            resetStarted.set_value();
+            subscription.Reset();
+            resetReturned.set_value();
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds{20});
-        Check(!stopReturned.load(std::memory_order_acquire),
-              "StopPump waits for an in-flight callback");
+        Check(resetStartedFuture.wait_for(std::chrono::seconds(2)) ==
+                  std::future_status::ready &&
+                  registry.WaitUntilAbsent(
+                      L"test.ResetFirstBarrier",
+                      std::chrono::seconds(2)) &&
+                  resetReturnedFuture.wait_for(std::chrono::milliseconds(20)) ==
+                      std::future_status::timeout,
+              "Reset-first cancellation closes admission but remains a join barrier");
+
+        std::promise<void> clearStarted;
+        std::promise<void> clearReturned;
+        auto clearStartedFuture = clearStarted.get_future();
+        auto clearReturnedFuture = clearReturned.get_future();
+        std::thread clearer([&] {
+            clearStarted.set_value();
+            registry.Clear();
+            clearReturned.set_value();
+        });
+        Check(clearStartedFuture.wait_for(std::chrono::seconds(2)) ==
+                  std::future_status::ready &&
+                  clearReturnedFuture.wait_for(std::chrono::milliseconds(20)) ==
+                      std::future_status::timeout,
+              "Clear also waits when Reset won the active-callback race");
+
         {
             std::lock_guard lock(mutex);
             release = true;
         }
         cv.notify_all();
+        evaluator.join();
+        resetter.join();
+        clearer.join();
+        Check(resetReturnedFuture.wait_for(std::chrono::seconds(2)) ==
+                  std::future_status::ready &&
+                  clearReturnedFuture.wait_for(std::chrono::seconds(2)) ==
+                      std::future_status::ready &&
+                  registry.EntryCount() == 0,
+              "Reset-first and Clear cancellation both finish after callback exit");
+    }
+
+    // System shutdown has the same barrier and rejects later observations.
+    {
+        CVarSystemTestAccess::Reset(Cvars());
+        FakeVTable vtable;
+        FakeCVar object;
+        Bind(object, vtable);
+        int32_t value = 1;
+        Check(Inject(L"test.StopBarrier", object, value),
+              "stop barrier fake injection succeeds");
+
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool entered = false;
+        bool release = false;
+        auto subscription = Cvars().WatchInt(Request(
+            L"test.StopBarrier",
+            [&](int32_t) {
+                std::unique_lock lock(mutex);
+                entered = true;
+                cv.notify_all();
+                cv.wait(lock, [&] { return release; });
+                return CVarWatchDecision::Complete;
+            }));
+        std::thread gameThread([] {
+            CVarSystemTestAccess::PumpOnce(Cvars());
+        });
+        {
+            std::unique_lock lock(mutex);
+            cv.wait(lock, [&] { return entered; });
+        }
+
+        std::promise<void> stopStarted;
+        std::promise<void> stopReturned;
+        auto stopStartedFuture = stopStarted.get_future();
+        auto stopReturnedFuture = stopReturned.get_future();
+        std::thread stopper([&] {
+            stopStarted.set_value();
+            Cvars().Stop();
+            stopReturned.set_value();
+        });
+        Check(stopStartedFuture.wait_for(std::chrono::seconds(2)) ==
+                  std::future_status::ready &&
+                  stopReturnedFuture.wait_for(std::chrono::milliseconds(20)) ==
+                      std::future_status::timeout,
+              "CVar shutdown waits for an in-flight callback");
+        {
+            std::lock_guard lock(mutex);
+            release = true;
+        }
+        cv.notify_all();
+        gameThread.join();
         stopper.join();
-        Check(stopReturned.load(std::memory_order_acquire),
-              "StopPump returns after callback and registry shutdown");
-        subscription.Reset();
+        Check(stopReturnedFuture.wait_for(std::chrono::seconds(2)) ==
+                  std::future_status::ready &&
+                  !Cvars().WatchInt(Request(
+                      L"test.AfterStop",
+                      [](int32_t) { return CVarWatchDecision::Complete; })) &&
+                  CVarSystemTestAccess::WatchEntryCount(Cvars()) == 0,
+              "shutdown clears registry and rejects new watches");
     }
-
-    // Deferred writes retain only their latest target.
-    {
-        CVarSystemTestAccess::Reset(Cvs());
-        int32_t storage = 0;
-        constexpr auto name = L"test.LatestPendingTarget";
-        Check(!Cvs().SetInt(name, 1), "first unresolved write is deferred");
-        Check(!Cvs().SetInt(name, 2), "second unresolved write replaces target");
-        Check(CVarSystemTestAccess::CommitPendingAsResolvedInt(Cvs(), name, &storage),
-              "pending CVar commits as resolved");
-        Check(storage == 2, "resolution writes the latest deferred target");
-        Check(Cvs().SetInt(name, 3) && storage == 3,
-              "resolved writes remain synchronous");
-    }
-
-    // Resolution is retained when an initial write only reaches the primary
-    // address. The pump retries the target without rescanning the CVar.
-    {
-        CVarSystemTestAccess::Reset(Cvs());
-        int32_t primary = 0;
-        int32_t shadow = 0;
-        constexpr auto name = L"test.RetryResolvedWrite";
-        Check(!Cvs().SetInt(name, 17), "unresolved write is deferred before half-write test");
-        Check(CVarSystemTestAccess::CommitPendingAsResolvedInt(Cvs(), name, &primary, 1),
-              "CVar remains resolved when the initial shadow address rejects the write");
-        Check(primary == 17 && CVarSystemTestAccess::HasPendingWrite(Cvs(), name),
-              "primary write is visible while the complete target remains pending");
-        Check(CVarSystemTestAccess::SetResolvedShadowAddress(
-                  Cvs(), name, reinterpret_cast<uintptr_t>(&shadow)),
-              "test repairs the transient shadow address without another resolve");
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(primary == 17 && shadow == 17 &&
-                  !CVarSystemTestAccess::HasPendingWrite(Cvs(), name),
-              "pump completes the retained resolved write and clears pending state");
-    }
-
-    {
-        CVarSystemTestAccess::Reset(Cvs());
-        CVarSystemTestAccess::SetPendingTimeout(Cvs(), std::chrono::milliseconds{1});
-        int32_t primary = 0;
-        constexpr auto name = L"test.ResolvedWriteTimeout";
-        Check(!Cvs().SetInt(name, 23), "write-timeout target starts unresolved");
-        Check(CVarSystemTestAccess::CommitPendingAsResolvedInt(Cvs(), name, &primary, 1),
-              "write-timeout target commits its resolved address");
-        std::this_thread::sleep_for(std::chrono::milliseconds{2});
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(CVarSystemTestAccess::HasCacheEntry(Cvs(), name) &&
-                  !CVarSystemTestAccess::HasPendingWrite(Cvs(), name),
-              "write timeout clears only the target and retains resolved cache");
-    }
-
-    // A temporarily unavailable game module requeues, rather than loses, scan work.
-    {
-        CVarSystemTestAccess::Reset(Cvs());
-        CVarSystemTestAccess::SimulateModuleUnavailable(Cvs());
-        Check(!Cvs().SetInt(L"test.RetryModule", 1),
-              "unresolved CVar queues an initial scan");
-        Check(CVarSystemTestAccess::InitialScanQueueSize(Cvs()) == 1,
-              "initial scan queue contains the unresolved CVar");
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(CVarSystemTestAccess::InitialScanQueueSize(Cvs()) == 1,
-              "unavailable module preserves scan work for a later pump");
-    }
-
-    // An active subscription keeps an aged pending CVar alive.
-    {
-        CVarSystemTestAccess::Reset(Cvs());
-        CVarSystemTestAccess::SetPendingTimeout(Cvs(), std::chrono::milliseconds{1});
-        constexpr auto name = L"test.KeepAlive";
-        Check(CVarSystemTestAccess::InjectAgedUnresolvedPending(Cvs(), name, 1),
-              "inject aged unresolved pending CVar");
-        int calls = 0;
-        auto subscription = Cvs().WatchInt(Request(name, [&](int32_t) {
-            ++calls;
-            return CVarWatchDecision::Complete;
-        }));
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(CVarSystemTestAccess::HasCacheEntry(Cvs(), name),
-              "active watch keeps aged pending CVar alive");
-        int32_t storage = 33;
-        Check(CVarSystemTestAccess::InjectResolvedInt(Cvs(), name, &storage),
-              "late CVar resolution is injectable");
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(calls == 1, "watch completes after late CVar resolution");
-    }
-
-    {
-        CVarSystemTestAccess::Reset(Cvs());
-        CVarSystemTestAccess::SetPendingTimeout(Cvs(), std::chrono::milliseconds{1});
-        constexpr auto name = L"test.DropAged";
-        Check(CVarSystemTestAccess::InjectAgedUnresolvedPending(Cvs(), name, 1),
-              "inject aged pending CVar without watch");
-        CVarSystemTestAccess::PumpOnce(Cvs());
-        Check(!CVarSystemTestAccess::HasCacheEntry(Cvs(), name),
-              "aged pending CVar is dropped without an observer");
-    }
-
-    CVarSystemTestAccess::Reset(Cvs());
 }

@@ -5,6 +5,7 @@
 
 #include <format>
 #include <string_view>
+#include <utility>
 
 void TestSliderUtils() {
     using jst::tweaks::DefaultSliderValue;
@@ -50,6 +51,8 @@ void TestSliderUtils() {
           "continuous slider preserves fractional input");
     Check(std::string_view(SliderDisplayFormat(0.5f)) == "%.1f",
           "0.5 step uses one decimal place");
+    Check(std::string_view(SliderDisplayFormat(0.25f)) == "%.2f",
+          "0.25 step retains the two decimals required by its grid");
     Check(std::string_view(SliderDisplayFormat(continuous.step)) == "%.3f",
           "continuous slider uses three decimal places");
     Check(NearlyEqual(LoadSliderValue(2.3f, halfStep), 2.5f),
@@ -86,6 +89,16 @@ void TestSliderUtils() {
           "sharpening product spec retains its maximum");
     Check(SliderStepCount(jst::tweaks::kMultiplierSliderSpec) == 100,
           "multiplier product spec exposes 100 steps");
+    for (const auto [raw, expected] : {
+             std::pair{0.87f, 0.9f},
+             std::pair{1.83f, 1.8f},
+             std::pair{3.07f, 3.1f},
+             std::pair{6.68f, 6.7f},
+             std::pair{8.93f, 8.9f},
+             std::pair{7.18f, 7.2f}}) {
+        Check(NormalizeFloatSlider(raw, sharpening) == expected,
+              std::format("decimal slider grid is exact for {}", expected));
+    }
     const auto pool24 = jst::tweaks::MakePoolSizePolicy(24ull << 30);
     Check(SliderStepCount(jst::tweaks::MakePoolSizeSliderSpec(pool24.limits)) == 163,
           "24 GiB pool spec exposes 0.5-16.8 in 0.1 steps");

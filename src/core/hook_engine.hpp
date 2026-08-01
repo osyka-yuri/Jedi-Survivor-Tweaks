@@ -11,6 +11,10 @@
 
 namespace jst::core {
 
+#if defined(JST_UNIT_TESTS)
+class HookEngineTestAccess;
+#endif
+
 // -----------------------------------------------------------------------------
 // HookEngine - transactional x64 hooking with Zydis, near-code gateways,
 // and explicit Resume / ReplayOriginal continuation semantics.
@@ -48,9 +52,13 @@ public:
     [[nodiscard]] std::optional<uintptr_t>
     GetContinuationAddress(std::string_view name) const;
 
-    void UnregisterHook(std::string_view name);
+    [[nodiscard]] std::expected<void, HookError>
+    UnregisterHook(std::string_view name);
 
 private:
+#if defined(JST_UNIT_TESTS)
+    friend class HookEngineTestAccess;
+#endif
     [[nodiscard]] std::expected<void, HookError> InsertHook(Hook&& hook);
 
     std::flat_map<std::string, Hook, std::less<>> m_hooks;

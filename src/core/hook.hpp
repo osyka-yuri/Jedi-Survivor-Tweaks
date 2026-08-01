@@ -12,6 +12,10 @@
 
 namespace jst::core {
 
+#if defined(JST_UNIT_TESTS)
+class HookEngineTestAccess;
+#endif
+
 class Hook final {
 public:
     Hook(HookSiteSpec spec,
@@ -51,6 +55,9 @@ public:
     [[nodiscard]] const ParsedPattern& Pattern() const noexcept { return m_parsedPattern; }
 
 private:
+#if defined(JST_UNIT_TESTS)
+    friend class HookEngineTestAccess;
+#endif
     static constexpr size_t kOriginalBytesCapacity = 32;
 
     [[nodiscard]] std::expected<void, HookError>
@@ -64,6 +71,7 @@ private:
     uintptr_t m_target = 0;
     uintptr_t m_detour = 0;
     ExecutableMemory m_gateway;
+    ExecutableMemory m_continuationGateway;
     std::array<std::byte, kOriginalBytesCapacity> m_originalBytes{};
     uint8_t m_originalBytesLength = 0;
     size_t m_overwriteLength = 0;

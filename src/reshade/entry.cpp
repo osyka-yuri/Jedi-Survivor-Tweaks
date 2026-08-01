@@ -20,21 +20,13 @@
 #include "main_app.hpp"
 #include "reshade/overlay.hpp"
 
-// ReShade headers leak a couple of W4 noise patterns through their template
-// expansions. Wrap the include site rather than tag the headers per-file in
-// vcxproj (which would not work, since they are headers not TUs).
-#pragma warning(push)
-#pragma warning(disable: 4100)  // unreferenced formal parameter
-#pragma warning(disable: 4127)  // conditional expression is constant
-#pragma warning(disable: 4324)  // structure padded due to alignment
 // imgui_compat.hpp must be included here (before reshade.hpp) so that
 // IMGUI_VERSION_NUM is defined when register_addon runs. Without it the
 // #if defined(IMGUI_VERSION_NUM) block in register_addon is skipped,
 // imgui_function_table_instance() stays nullptr, and DrawOverlay crashes
 // on the first ImGui call.
-#include <external/reshade/imgui_compat.hpp>
-#include <external/reshade/reshade.hpp>
-#pragma warning(pop)
+#include <reshade/imgui_compat.hpp>
+#include <reshade/reshade.hpp>
 
 extern "C" __declspec(dllexport) const char* const NAME        = "JediSurvivorTweaks";
 extern "C" __declspec(dllexport) const char* const DESCRIPTION =

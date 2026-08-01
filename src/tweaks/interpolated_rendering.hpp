@@ -1,28 +1,39 @@
 #pragma once
 
+#include "core/cvar_system.hpp"
 #include "tweak.hpp"
-#include <string>
 
 namespace jst::tweaks {
 
 class InterpolatedRenderingTweak final : public ITweak {
 public:
-    InterpolatedRenderingTweak() = default;
-    ~InterpolatedRenderingTweak() override = default;
+    [[nodiscard]] std::string_view Name() const noexcept override {
+        return "InterpolatedRendering";
+    }
+    [[nodiscard]] std::string_view Description() const noexcept override {
+        return "Opt-in frame interpolation intended to reduce CPU stutters and camera jitter.";
+    }
+    [[nodiscard]] bool IsEnabledByDefault() const noexcept override {
+        return false;
+    }
+    [[nodiscard]] TweakActivationMode ActivationMode() const noexcept override {
+        return TweakActivationMode::Runtime;
+    }
 
-    [[nodiscard]] std::string_view Name() const override { return "InterpolatedRendering"; }
-    [[nodiscard]] std::string_view Description() const override { return "Reduces CPU stutters and camera jitters by enabling frame interpolation."; }
-    [[nodiscard]] bool IsEnabledByDefault() const override { return true; }
-
-    [[nodiscard]] std::expected<void, std::string> Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) override;
+    [[nodiscard]] std::expected<TweakActivation, std::string> Configure(
+        const jst::core::Config& config) override;
+    [[nodiscard]] std::expected<void, std::string> Prepare(
+        jst::core::HookEngine& hooks) override;
     void Shutdown() override;
-    [[nodiscard]] bool IsInitialized() const override { return m_initialized; }
 
     [[nodiscard]] std::vector<RuntimeControl> GetRuntimeControls() override;
+    [[nodiscard]] std::optional<TweakRuntimeStatus> RuntimeStatus()
+        const override;
 
 private:
-    bool m_initialized = false;
-    bool m_irEnabled   = false;     // loaded from config in Initialize; mutated by overlay
+    bool m_enabled = false;
+    bool m_overrideOwned = false;
+    jst::core::CVarCommandTicket m_ticket;
 };
 
 } // namespace jst::tweaks

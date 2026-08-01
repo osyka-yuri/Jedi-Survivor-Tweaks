@@ -81,7 +81,7 @@ private:
     // Caller holds m_mutex for every method suffixed Locked.
     void PublishPolicyLocked() const noexcept;
     void EnterAutoWaitingLocked();
-    void PublishSafeHoldLocked();
+    void PublishWaitingStateLocked();
     void PublishLockLocked(uint64_t bytes, StreamingPoolState state, int32_t engineMb = 0);
     void PublishFallbackLocked();
     [[nodiscard]] bool TryAdoptPathSampleLocked();

@@ -124,7 +124,25 @@ void TestStreamingPoolController() {
               "non-finite manual request is sanitized to policy fallback");
     }
 
-    // Auto waits behind a safe hold and gives an in-range CVar first priority.
+    // Initial Auto observes the natural streaming path without forcing a size.
+    {
+        BoundController bound(p24);
+        bound.controller.ArmAuto();
+        Check(bound.controller.Snapshot().state ==
+                  StreamingPoolState::WaitingForEngine &&
+                  bound.controller.Snapshot().lockedBytes == 0 &&
+                  bound.ForcedBytes() == 0,
+              "initial Auto leaves the streaming hook without a forced lock");
+        Check(bound.controller.UpdatePolicy(p8),
+              "passive Auto accepts a late GPU policy");
+        Check(bound.controller.Snapshot().lockedBytes == 0 &&
+                  bound.ForcedBytes() == 0 &&
+                  bound.CeilingBytes() == p8.limits.maximumBytes,
+              "policy updates preserve the passive startup gate");
+    }
+
+    // Runtime Auto waits behind the existing safe lock and still gives an
+    // in-range CVar first priority.
     {
         BoundController bound(p24);
         bound.controller.ArmManual(2.0f);
@@ -136,7 +154,7 @@ void TestStreamingPoolController() {
         Check(waiting.state == StreamingPoolState::WaitingForEngine,
               "ArmAuto waits for the CVar even with an existing path sample");
         Check(bound.ForcedBytes() == PoolSizeGbToBytes(2.0f, p24.limits),
-              "Auto keeps the previous safe manual size as its closed hold");
+              "runtime Auto keeps the previous safe manual size while waiting");
 
         Check(bound.controller.ObserveEnginePoolMb(4000) ==
                   EnginePoolObservation::LockedFromCVar,
@@ -153,7 +171,8 @@ void TestStreamingPoolController() {
               "later CVar observations are inactive after a CVar lock");
     }
 
-    // Invalid CVar values keep the safe hold and expose the latest rejection.
+    // Invalid CVar values preserve the passive startup gate and expose the
+    // latest rejection.
     {
         BoundController bound(p24);
         bound.controller.ArmAuto();
@@ -174,7 +193,7 @@ void TestStreamingPoolController() {
                   snapshot.lastRejectedCandidate->sizeMb == 20'000,
               "rejected CVar leaves Auto waiting with rejection diagnostics");
         Check(bound.ForcedBytes() == temporary,
-              "invalid CVar observations preserve the closed hold");
+              "invalid CVar observations preserve the current waiting gate");
     }
 
     // A path sample is secondary after an unusable CVar tick.

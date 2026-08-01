@@ -35,39 +35,44 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="..\JediSurvivorTweaks.Common.props" />
   <PropertyGroup>
     <OutDir>$(ProjectDir)..\x64\$(Configuration)\tests\</OutDir>
     <IntDir>$(ProjectDir)..\x64\$(Configuration)\tests\obj\</IntDir>
     <TargetName>JediSurvivorTweaks.Tests</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup>
-    <PreBuildEvent>
-      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\scripts\generate_hook_slots.ps1"</Command>
-    </PreBuildEvent>
     <ClCompile>
-      <WarningLevel>Level4</WarningLevel>
-      <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;ZYDIS_STATIC_BUILD;JST_UNIT_TESTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpplatest</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\src;$(ProjectDir)..\src\external\zydis;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/FS /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>JST_UNIT_TESTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="test_main.cpp" />
     <ClCompile Include="hook_engine_tests.cpp" />
+    <ClCompile Include="config_tests.cpp" />
+    <ClCompile Include="custom_cvar_value_tests.cpp" />
     <ClCompile Include="slider_utils_tests.cpp" />
     <ClCompile Include="runtime_control_tests.cpp" />
     <ClCompile Include="streaming_pool_controller_tests.cpp" />
     <ClCompile Include="pool_size_setting_tests.cpp" />
+    <ClCompile Include="cvar_resolver_tests.cpp" />
+    <ClCompile Include="cvar_writer_tests.cpp" />
     <ClCompile Include="cvar_watch_tests.cpp" />
+    <ClCompile Include="managed_cvar_tests.cpp" />
+    <ClCompile Include="cvar_runtime_coordinator_tests.cpp" />
+    <ClCompile Include="game_thread_dispatcher_tests.cpp" />
+    <ClCompile Include="game_settings_barrier_tests.cpp" />
+    <ClCompile Include="max_fps_tests.cpp" />
+    <ClCompile Include="interpolated_rendering_tests.cpp" />
+    <ClCompile Include="tweak_manager_tests.cpp" />
     <ClCompile Include="graphics_adapter_service_tests.cpp" />
     <ClCompile Include="import_address_hook_tests.cpp" />
     <ClCompile Include="pe_imports_tests.cpp" />
     <ClCompile Include="..\src\core\config.cpp" />
+    <ClCompile Include="..\src\core\detour_gate.cpp" />
     <ClCompile Include="..\src\core\hook_engine.cpp" />
     <ClCompile Include="..\src\core\hook_transaction.cpp" />
     <ClCompile Include="..\src\core\instruction_relocator.cpp" />
@@ -78,19 +83,29 @@
     <ClCompile Include="..\src\core\cvar_resolver.cpp" />
     <ClCompile Include="..\src\core\cvar_scanner.cpp" />
     <ClCompile Include="..\src\core\cvar_system.cpp" />
+    <ClCompile Include="..\src\core\cvar_runtime_coordinator.cpp" />
     <ClCompile Include="..\src\core\cvar_watch_registry.cpp" />
+    <ClCompile Include="..\src\core\game_settings_barrier.cpp" />
+    <ClCompile Include="..\src\core\game_thread_dispatcher.cpp" />
     <ClCompile Include="..\src\core\graphics_adapter_service.cpp" />
     <ClCompile Include="..\src\core\import_address_hook.cpp" />
     <ClCompile Include="..\src\core\pe_imports.cpp" />
     <ClCompile Include="..\src\hooks\hook_context.cpp" />
     <ClCompile Include="..\src\tweaks\hook_tweak.cpp" />
+    <ClCompile Include="..\src\tweaks\tweak_manager.cpp" />
+    <ClCompile Include="..\src\tweaks\graphical_tweaks.cpp" />
+    <ClCompile Include="..\src\tweaks\custom_cvars.cpp" />
+    <ClCompile Include="..\src\tweaks\max_fps.cpp" />
+    <ClCompile Include="..\src\tweaks\interpolated_rendering.cpp" />
     <ClCompile Include="..\src\tweaks\runtime_control.cpp" />
+    <ClCompile Include="..\src\tweaks\cvar_runtime_status.cpp" />
     <ClCompile Include="..\src\tweaks\streaming_pool_policy.cpp" />
     <ClCompile Include="..\src\tweaks\streaming_pool_controller.cpp" />
     <ClCompile Include="..\src\external\zydis\Zydis.c">
       <!-- Vendored Zydis 4.1.1 (monolithic MIT single-file build). Lower warning level
            prevents upstream noise from affecting our /W4 build. -->
       <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

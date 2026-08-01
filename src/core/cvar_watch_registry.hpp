@@ -2,10 +2,10 @@
 
 #include "cvar_watch.hpp"
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -13,35 +13,58 @@
 
 namespace jst::core {
 
-// Internal callback registry used by CVarSystem's pump. Resolution and value
+struct CVarWatchRegistryState;
+
+// Shared cancellation state retained by both the registry and the public
+// subscription. Cancellation remains a join barrier even after Clear removes
+// the registry entry.
+class CVarWatchControl final {
+public:
+    void CancelAndWait();
+    [[nodiscard]] bool IsActive() const;
+
+private:
+    friend class CVarWatchRegistry;
+
+    void Cancel();
+    void Wait();
+    void DetachFromRegistry();
+
+    uint64_t id = 0;
+    IntWatchRequest request;
+    std::chrono::steady_clock::time_point deadline{};
+    std::weak_ptr<CVarWatchRegistryState> registryState;
+
+    mutable std::mutex mutex;
+    std::condition_variable cv;
+    bool active = true;
+    size_t inFlight = 0;
+};
+
+// Internal callback registry used by CVarSystem's game-thread pass. Resolution and value
 // access remain owned by CVarSystem and are supplied through ValueReader.
 class CVarWatchRegistry final {
 public:
     using ValueReader = std::function<std::optional<int32_t>(std::wstring_view)>;
 
-    [[nodiscard]] uint64_t Register(IntWatchRequest request);
-    void Cancel(uint64_t id);
-    void Clear();
+    CVarWatchRegistry();
 
-    [[nodiscard]] bool HasAny() const;
+    [[nodiscard]] std::shared_ptr<CVarWatchControl> Register(
+        IntWatchRequest request);
+    void Clear();
+    void OpenStartupBarrier(std::chrono::steady_clock::time_point now);
+
     [[nodiscard]] bool HasFor(std::wstring_view name) const;
+#if defined(JST_UNIT_TESTS)
+    [[nodiscard]] bool WaitUntilAbsent(
+        std::wstring_view name,
+        std::chrono::milliseconds timeout) const;
+    [[nodiscard]] size_t EntryCount() const;
+#endif
     void Evaluate(const ValueReader& readValue);
 
 private:
-    struct WatchEntry {
-        uint64_t id = 0;
-        IntWatchRequest request;
-        std::chrono::steady_clock::time_point deadline{};
-        bool active = true;
-        size_t inFlight = 0;
-    };
-
-    mutable std::mutex m_mutex;
-    std::condition_variable m_cv;
-    // Registration order makes callback behavior deterministic and lets one
-    // callback safely cancel a later subscription before it starts.
-    std::map<uint64_t, std::shared_ptr<WatchEntry>> m_entries;
-    uint64_t m_nextId = 1;
+    std::shared_ptr<CVarWatchRegistryState> m_state;
 };
 
 } // namespace jst::core

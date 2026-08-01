@@ -37,22 +37,30 @@ HookTweak::HookTweak(std::string name,
       m_runtimeFloatConfig(std::move(runtimeFloatConfig)),
       m_enabledByDefault(enabledByDefault) {}
 
-std::expected<void, std::string>
-HookTweak::Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) {
-    if (m_bindings.empty()) {
-        return std::unexpected(
-            std::format("Hook tweak '{}' has no hook bindings", m_name));
-    }
-
+std::expected<TweakActivation, std::string>
+HookTweak::Configure(const jst::core::Config& config) {
     m_overlayEnabledPref = config.GetBool(m_name, "Enabled", m_enabledByDefault);
     OnConfigLoaded(config);
-
     if (m_runtimeFloatConfig) {
         const auto& runtimeFloat = *m_runtimeFloatConfig;
         m_loadedMultiplier = LoadSliderValue(
-            config.GetFloat(m_name, runtimeFloat.configKey, runtimeFloat.slider.defaultValue),
+            config.GetFloatInRange(
+                m_name,
+                runtimeFloat.configKey,
+                runtimeFloat.slider.defaultValue,
+                runtimeFloat.slider.min,
+                runtimeFloat.slider.max),
             runtimeFloat.slider);
         ApplyMultiplier(m_loadedMultiplier);
+    }
+    return TweakActivation{.enabled = m_overlayEnabledPref};
+}
+
+std::expected<void, std::string>
+HookTweak::Prepare(jst::core::HookEngine& hooks) {
+    if (m_bindings.empty()) {
+        return std::unexpected(
+            std::format("Hook tweak '{}' has no hook bindings", m_name));
     }
 
     auto makeSpec = [this](const HookBinding& b) {
@@ -76,9 +84,13 @@ HookTweak::Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) {
                   binding.target.patternOffset,
                   binding.detour);
         if (!registered) {
-            UnregisterBindings(hooks);
+            const std::string rollbackError = UnregisterBindings(hooks);
             return std::unexpected(std::format(
-                "{} [{}]", registered.error().message, binding.siteName));
+                "{} [{}]{}{}",
+                registered.error().message,
+                binding.siteName,
+                rollbackError.empty() ? "" : "; rollback: ",
+                rollbackError));
         }
     }
 
@@ -90,14 +102,16 @@ HookTweak::FinalizeResolution(jst::core::HookEngine& hooks) {
     for (const auto& binding : m_bindings) {
         auto continuation = hooks.GetContinuationAddress(binding.siteName);
         if (!continuation) {
-            UnregisterBindings(hooks);
+            const std::string rollbackError = UnregisterBindings(hooks);
             return std::unexpected(std::format(
-                "Hook site '{}' did not resolve", binding.siteName));
+                "Hook site '{}' did not resolve{}{}",
+                binding.siteName,
+                rollbackError.empty() ? "" : "; rollback: ",
+                rollbackError));
         }
         jst::hooks::GetContext(binding.slot).resumeAddress = *continuation;
     }
 
-    m_resolutionFinalized = true;
     JST_LOG_INFO("Prepared hook group '{}' with {} site(s).",
                  m_name, m_bindings.size());
     return {};
@@ -105,13 +119,13 @@ HookTweak::FinalizeResolution(jst::core::HookEngine& hooks) {
 
 std::expected<void, std::string>
 HookTweak::FinalizeInstallation(jst::core::HookEngine& hooks) {
-    if (!m_resolutionFinalized || !hooks.IsGroupInstalled(m_name)) {
-        m_initialized = false;
+    if (!hooks.IsGroupInstalled(m_name)) {
+        m_effectActive = false;
         return std::unexpected(std::format(
             "Hook group '{}' was not installed atomically", m_name));
     }
 
-    m_initialized = true;
+    m_effectActive = true;
     if (m_runtimeFloatConfig) {
         JST_LOG_INFO("Installed hook group '{}' | multiplier={} | sites={}",
                      m_name, m_loadedMultiplier, m_bindings.size());
@@ -128,12 +142,19 @@ void HookTweak::ApplyMultiplier(float multiplier) {
     OnRuntimeFloatChanged(multiplier);
 }
 
-void HookTweak::UnregisterBindings(jst::core::HookEngine& hooks) {
+std::string HookTweak::UnregisterBindings(jst::core::HookEngine& hooks) {
+    std::string firstError;
     for (const auto& binding : m_bindings) {
-        hooks.UnregisterHook(binding.siteName);
+        if (auto removed = hooks.UnregisterHook(binding.siteName);
+            !removed && firstError.empty()) {
+            firstError = std::format(
+                "{} [{}]",
+                removed.error().message,
+                binding.siteName);
+        }
     }
-    m_resolutionFinalized = false;
-    m_initialized = false;
+    m_effectActive = false;
+    return firstError;
 }
 
 std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
@@ -144,7 +165,10 @@ std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
         .label = "Load on launch",
         .current = m_overlayEnabledPref,
         .defaultValue = m_enabledByDefault,
-        .apply = [this](bool value) { m_overlayEnabledPref = value; },
+        .apply = [this](bool value) {
+            m_overlayEnabledPref = value;
+            return AppliedEdit();
+        },
         .persistence = ControlPersistence{
             .section = m_name,
             .key = "Enabled",
@@ -154,7 +178,7 @@ std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
             "game launch. Runtime controls below apply immediately.",
     });
 
-    if (m_runtimeFloatConfig && m_initialized) {
+    if (m_runtimeFloatConfig && m_effectActive) {
         const auto& runtimeFloat = *m_runtimeFloatConfig;
         controls.push_back(LabelControl{.label = "Live below \xe2\x86\x93"});
         controls.push_back(MakeSliderFloatControl(
@@ -164,6 +188,7 @@ std::vector<RuntimeControl> HookTweak::GetRuntimeControls() {
                 m_loadedMultiplier = value;
                 ApplyMultiplier(value);
                 JST_LOG_INFO("{} multiplier -> {:.3f}", m_name, value);
+                return AppliedEdit();
             },
             runtimeFloat.sliderLabel.empty() ? runtimeFloat.configKey : runtimeFloat.sliderLabel,
             m_name,
@@ -183,7 +208,7 @@ RuntimeControlResetResult HookTweak::ResetRuntimeControls(jst::core::Config& con
         changed = true;
     }
 
-    if (m_runtimeFloatConfig && m_initialized) {
+    if (m_runtimeFloatConfig && m_effectActive) {
         const auto& runtimeFloat = *m_runtimeFloatConfig;
         const float defaultValue = DefaultSliderValue(runtimeFloat.slider);
         if (!SliderValuesNearlyEqual(m_loadedMultiplier, defaultValue)) {
@@ -200,8 +225,7 @@ RuntimeControlResetResult HookTweak::ResetRuntimeControls(jst::core::Config& con
 }
 
 void HookTweak::Shutdown() {
-    m_initialized = false;
-    m_resolutionFinalized = false;
+    m_effectActive = false;
 }
 
 } // namespace jst::tweaks

@@ -1,13 +1,28 @@
 #include "cvar_watch_registry.hpp"
 
+#include "cvar_name.hpp"
 #include "logging.hpp"
 #include "string_utils.hpp"
 
+#include <algorithm>
 #include <exception>
+#include <map>
 #include <utility>
 #include <vector>
 
 namespace jst::core {
+
+struct CVarWatchRegistryState {
+    mutable std::mutex mutex;
+#if defined(JST_UNIT_TESTS)
+    mutable std::condition_variable entriesCv;
+#endif
+    // Registration order makes callback behavior deterministic and lets one
+    // callback safely cancel a later subscription before it starts. Weak
+    // ownership ensures the index never extends a subscription's lifetime.
+    std::map<uint64_t, std::weak_ptr<CVarWatchControl>> entries;
+    uint64_t nextId = 1;
+};
 
 namespace {
 
@@ -23,51 +38,155 @@ void LogUnknownWatchException(uint64_t id, std::string_view phase) {
 
 } // namespace
 
-uint64_t CVarWatchRegistry::Register(IntWatchRequest request) {
-    std::lock_guard lock(m_mutex);
-    uint64_t id = m_nextId++;
-    if (id == 0) {
-        id = m_nextId++;
+void CVarWatchControl::CancelAndWait() {
+    Cancel();
+    Wait();
+    DetachFromRegistry();
+}
+
+void CVarWatchControl::Cancel() {
+    std::lock_guard lock(mutex);
+    active = false;
+}
+
+void CVarWatchControl::Wait() {
+    std::unique_lock lock(mutex);
+    cv.wait(lock, [this] { return inFlight == 0; });
+}
+
+void CVarWatchControl::DetachFromRegistry() {
+    const auto state = registryState.lock();
+    if (!state) {
+        return;
     }
 
-    auto entry = std::make_shared<WatchEntry>();
+    std::lock_guard lock(state->mutex);
+    const auto found = state->entries.find(id);
+    if (found == state->entries.end()) {
+        return;
+    }
+    const auto indexed = found->second.lock();
+    if (!indexed || indexed.get() == this) {
+        state->entries.erase(found);
+#if defined(JST_UNIT_TESTS)
+        state->entriesCv.notify_all();
+#endif
+    }
+}
+
+bool CVarWatchControl::IsActive() const {
+    std::lock_guard lock(mutex);
+    return active;
+}
+
+CVarWatchRegistry::CVarWatchRegistry()
+    : m_state(std::make_shared<CVarWatchRegistryState>()) {}
+
+std::shared_ptr<CVarWatchControl> CVarWatchRegistry::Register(
+    IntWatchRequest request) {
+    const auto state = m_state;
+    std::lock_guard lock(state->mutex);
+    uint64_t id = state->nextId++;
+    if (id == 0) {
+        id = state->nextId++;
+    }
+
+    auto entry = std::make_shared<CVarWatchControl>();
     entry->id = id;
     entry->deadline = std::chrono::steady_clock::now() + request.timeout;
     entry->request = std::move(request);
-    m_entries.emplace(id, std::move(entry));
-    return id;
-}
-
-void CVarWatchRegistry::Cancel(uint64_t id) {
-    if (id == 0) {
-        return;
-    }
-
-    std::unique_lock lock(m_mutex);
-    const auto found = m_entries.find(id);
-    if (found == m_entries.end()) {
-        return;
-    }
-
-    const auto entry = found->second;
-    entry->active = false;
-    m_entries.erase(found);
-    m_cv.wait(lock, [&] { return entry->inFlight == 0; });
+    entry->registryState = state;
+    state->entries.emplace(id, entry);
+    return entry;
 }
 
 void CVarWatchRegistry::Clear() {
-    std::unique_lock lock(m_mutex);
-    std::vector<std::shared_ptr<WatchEntry>> entries;
-    entries.reserve(m_entries.size());
-    for (auto& [id, entry] : m_entries) {
-        (void)id;
-        entry->active = false;
-        entries.push_back(entry);
+    std::vector<std::shared_ptr<CVarWatchControl>> entries;
+    const auto state = m_state;
+    {
+        std::lock_guard lock(state->mutex);
+        entries.reserve(state->entries.size());
+        for (auto& [id, entry] : state->entries) {
+            (void)id;
+            if (auto retained = entry.lock()) {
+                entries.push_back(std::move(retained));
+            }
+        }
+        state->entries.clear();
+#if defined(JST_UNIT_TESTS)
+        state->entriesCv.notify_all();
+#endif
     }
-    m_entries.clear();
-    m_cv.wait(lock, [&] {
-        for (const auto& entry : entries) {
-            if (entry->inFlight != 0) {
+    // Close admission for the complete snapshot before waiting for any one
+    // callback. This prevents a later entry from starting while Clear is
+    // blocked behind an earlier callback.
+    for (const auto& entry : entries) {
+        entry->Cancel();
+    }
+    for (const auto& entry : entries) {
+        entry->Wait();
+    }
+}
+
+void CVarWatchRegistry::OpenStartupBarrier(
+    std::chrono::steady_clock::time_point now) {
+    std::vector<std::shared_ptr<CVarWatchControl>> entries;
+    const auto state = m_state;
+    {
+        std::lock_guard lock(state->mutex);
+        for (const auto& [id, entry] : state->entries) {
+            (void)id;
+            if (auto retained = entry.lock()) {
+                entries.push_back(std::move(retained));
+            }
+        }
+    }
+    for (const auto& entry : entries) {
+        std::lock_guard lock(entry->mutex);
+        if (entry->active) {
+            entry->deadline = now + entry->request.timeout;
+        }
+    }
+}
+
+bool CVarWatchRegistry::HasFor(std::wstring_view name) const {
+    std::vector<std::shared_ptr<CVarWatchControl>> entries;
+    const auto state = m_state;
+    {
+        std::lock_guard lock(state->mutex);
+        for (const auto& [id, entry] : state->entries) {
+            (void)id;
+            if (auto retained = entry.lock()) {
+                entries.push_back(std::move(retained));
+            }
+        }
+    }
+    const CVarNameEqual equal;
+    for (const auto& entry : entries) {
+        std::lock_guard lock(entry->mutex);
+        if (entry->active && equal(entry->request.name, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+#if defined(JST_UNIT_TESTS)
+bool CVarWatchRegistry::WaitUntilAbsent(
+    std::wstring_view name,
+    std::chrono::milliseconds timeout) const {
+    const CVarNameEqual equal;
+    const auto state = m_state;
+    std::unique_lock lock(state->mutex);
+    return state->entriesCv.wait_for(lock, timeout, [&] {
+        for (const auto& [id, weakEntry] : state->entries) {
+            (void)id;
+            const auto entry = weakEntry.lock();
+            if (!entry) {
+                continue;
+            }
+            std::lock_guard entryLock(entry->mutex);
+            if (entry->active && equal(entry->request.name, name)) {
                 return false;
             }
         }
@@ -75,44 +194,40 @@ void CVarWatchRegistry::Clear() {
     });
 }
 
-bool CVarWatchRegistry::HasAny() const {
-    std::lock_guard lock(m_mutex);
-    return !m_entries.empty();
+size_t CVarWatchRegistry::EntryCount() const {
+    const auto state = m_state;
+    std::lock_guard lock(state->mutex);
+    return static_cast<size_t>(std::count_if(
+        state->entries.begin(),
+        state->entries.end(),
+        [](const auto& item) { return !item.second.expired(); }));
 }
-
-bool CVarWatchRegistry::HasFor(std::wstring_view name) const {
-    std::lock_guard lock(m_mutex);
-    for (const auto& [id, entry] : m_entries) {
-        (void)id;
-        if (entry->active && entry->request.name == name) {
-            return true;
-        }
-    }
-    return false;
-}
+#endif
 
 void CVarWatchRegistry::Evaluate(const ValueReader& readValue) {
-    std::vector<std::shared_ptr<WatchEntry>> entries;
+    std::vector<std::shared_ptr<CVarWatchControl>> entries;
+    const auto state = m_state;
     {
-        std::lock_guard lock(m_mutex);
-        entries.reserve(m_entries.size());
-        for (const auto& [id, entry] : m_entries) {
+        std::lock_guard lock(state->mutex);
+        entries.reserve(state->entries.size());
+        for (const auto& [id, entry] : state->entries) {
             (void)id;
-            if (!entry->active) {
-                continue;
+            if (auto retained = entry.lock()) {
+                entries.push_back(std::move(retained));
             }
-            entries.push_back(entry);
         }
     }
 
     const auto now = std::chrono::steady_clock::now();
     for (const auto& entry : entries) {
+        std::chrono::steady_clock::time_point deadline;
         {
-            std::lock_guard lock(m_mutex);
+            std::lock_guard lock(entry->mutex);
             if (!entry->active) {
                 continue;
             }
             ++entry->inFlight;
+            deadline = entry->deadline;
         }
 
         bool complete = false;
@@ -128,7 +243,7 @@ void CVarWatchRegistry::Evaluate(const ValueReader& readValue) {
             complete = true;
         }
 
-        if (!complete && now >= entry->deadline) {
+        if (!complete && now >= deadline) {
             complete = true;
             timedOut = true;
             try {
@@ -158,16 +273,12 @@ void CVarWatchRegistry::Evaluate(const ValueReader& readValue) {
         }
 
         {
-            std::lock_guard lock(m_mutex);
+            std::lock_guard lock(entry->mutex);
             if (complete) {
-                const auto found = m_entries.find(entry->id);
-                if (found != m_entries.end() && found->second == entry) {
-                    entry->active = false;
-                    m_entries.erase(found);
-                }
+                entry->active = false;
             }
             --entry->inFlight;
-            m_cv.notify_all();
+            entry->cv.notify_all();
         }
 
         if (timedOut) {
@@ -175,6 +286,19 @@ void CVarWatchRegistry::Evaluate(const ValueReader& readValue) {
                           entry->id, utils::WideToUtf8(entry->request.name));
         }
     }
+
+    std::lock_guard lock(state->mutex);
+    const auto removed = std::erase_if(state->entries, [](const auto& item) {
+        const auto entry = item.second.lock();
+        return !entry || !entry->IsActive();
+    });
+#if defined(JST_UNIT_TESTS)
+    if (removed != 0) {
+        state->entriesCv.notify_all();
+    }
+#else
+    (void)removed;
+#endif
 }
 
 } // namespace jst::core

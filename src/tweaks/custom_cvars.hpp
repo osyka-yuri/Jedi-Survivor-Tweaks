@@ -1,25 +1,41 @@
 #pragma once
 
+#include "core/cvar_system.hpp"
 #include "tweak.hpp"
-#include <string>
+
+#include <cstddef>
 
 namespace jst::tweaks {
 
 class CustomCVarsTweak final : public ITweak {
 public:
-    CustomCVarsTweak() = default;
-    ~CustomCVarsTweak() override = default;
+    [[nodiscard]] std::string_view Name() const noexcept override {
+        return "CVars";
+    }
+    [[nodiscard]] std::string_view Description() const noexcept override {
+        return "Applies custom numeric Unreal Engine Console Variable values.";
+    }
+    [[nodiscard]] bool IsEnabledByDefault() const noexcept override {
+        return true;
+    }
 
-    [[nodiscard]] std::string_view Name() const override { return "CVars"; }
-    [[nodiscard]] std::string_view Description() const override { return "Applies arbitrary custom Unreal Engine Console Variable (CVar) values."; }
-    [[nodiscard]] bool IsEnabledByDefault() const override { return true; }
-
-    [[nodiscard]] std::expected<void, std::string> Initialize(jst::core::HookEngine& hooks, jst::core::Config& config) override;
+    [[nodiscard]] std::expected<TweakActivation, std::string> Configure(
+        const jst::core::Config& config) override;
+    [[nodiscard]] std::expected<void, std::string> Prepare(
+        jst::core::HookEngine& hooks) override;
     void Shutdown() override;
-    [[nodiscard]] bool IsInitialized() const override { return m_initialized; }
+    [[nodiscard]] std::optional<TweakRuntimeStatus> RuntimeStatus()
+        const override;
 
 private:
-    bool m_initialized = false;
+    struct Entry {
+        std::wstring name;
+        std::wstring value;
+    };
+
+    std::vector<Entry> m_entries;
+    std::vector<jst::core::CVarCommandTicket> m_tickets;
+    size_t m_initialManagedConflicts = 0;
 };
 
 } // namespace jst::tweaks

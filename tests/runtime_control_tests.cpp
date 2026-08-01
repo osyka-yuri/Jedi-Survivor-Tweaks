@@ -15,14 +15,13 @@ public:
     explicit ResetTweak(jst::tweaks::RuntimeControlResetResult result)
         : m_result(result) {}
 
-    std::string_view Name() const override { return "Test"; }
-    std::string_view Description() const override { return "Test"; }
-    std::expected<void, std::string> Initialize(
-        jst::core::HookEngine&, jst::core::Config&) override {
+    std::string_view Name() const noexcept override { return "Test"; }
+    std::string_view Description() const noexcept override { return "Test"; }
+    std::expected<void, std::string> Prepare(
+        jst::core::HookEngine&) override {
         return {};
     }
     void Shutdown() override {}
-    bool IsInitialized() const override { return true; }
     jst::tweaks::RuntimeControlResetResult ResetRuntimeControls(
         jst::core::Config&) override {
         ++resetCalls;
@@ -49,7 +48,8 @@ void TestRuntimeControls() {
 
     {
         auto control = MakeSliderFloatControl(
-            kTenthStep, 0.87f, [](float) {}, "test", "Section", "Value");
+            kTenthStep, 0.87f, [](float) { return AppliedEdit(); },
+            "test", "Section", "Value");
         Check(NearlyEqual(control.spec.defaultValue, 0.9f),
               "slider control normalizes its default");
         Check(NearlyEqual(control.current, 0.9f),
@@ -61,15 +61,19 @@ void TestRuntimeControls() {
         auto control = MakeSliderFloatControl(
             kTenthStep,
             0.5f,
-            [&](float) { ++applyCalls; },
+            [&](float) {
+                ++applyCalls;
+                return AppliedEdit();
+            },
             "test",
             "Section",
             "Value");
-        Check(TryCommitSliderEdit(control, 1.04f, control.current),
+        Check(TryCommitSliderEdit(control, 1.04f, control.current).ShouldPersist(),
               "slider edit commits a changed grid value");
         Check(applyCalls == 1 && NearlyEqual(control.current, 1.0f),
               "slider edit normalizes and applies once");
-        Check(!TryCommitSliderEdit(control, 1.00001f, control.current),
+        Check(TryCommitSliderEdit(control, 1.00001f, control.current).state ==
+                  RuntimeEditState::Unchanged,
               "near-equal slider edit is unchanged");
         Check(applyCalls == 1, "unchanged slider edit does not apply again");
         RestoreSliderBaseline(control, 0.5f);
@@ -77,11 +81,42 @@ void TestRuntimeControls() {
               "idle frame can restore tweak-owned baseline");
     }
 
+    {
+        auto rejected = MakeSliderFloatControl(
+            kTenthStep,
+            0.5f,
+            [](float) { return RejectedEdit("not available"); },
+            "rejected",
+            "Runtime",
+            "Rejected");
+        const auto rejectedResult =
+            TryCommitSliderEdit(rejected, 1.2f, rejected.current);
+        Check(rejectedResult.state == RuntimeEditState::Rejected &&
+                  NearlyEqual(rejected.current, 0.5f) &&
+                  !rejectedResult.ShouldPersist(),
+              "rejected edit rolls back the control and is not persistable");
+
+        auto queued = MakeSliderFloatControl(
+            kTenthStep,
+            0.5f,
+            [](float) { return QueuedEdit(); },
+            "queued",
+            "Runtime",
+            "Queued");
+        const auto queuedResult =
+            TryCommitSliderEdit(queued, 1.2f, queued.current);
+        Check(queuedResult.state == RuntimeEditState::Queued &&
+                  NearlyEqual(queued.current, 1.2f) &&
+                  queuedResult.ShouldPersist(),
+              "queued edit updates desired state and is persistable immediately");
+    }
+
     // Ordinary persistence uses the control's typed config binding.
     {
         jst::core::Config config;
         RuntimeControl slider = MakeSliderFloatControl(
-            kTenthStep, 1.2f, [](float) {}, "slider", "Runtime", "Scale");
+            kTenthStep, 1.2f, [](float) { return AppliedEdit(); },
+            "slider", "Runtime", "Scale");
         PersistControl(slider, config);
         Check(NearlyEqual(config.GetFloat("Runtime", "Scale", 0.0f), 1.2f),
               "slider persistence writes a float binding");
@@ -90,7 +125,7 @@ void TestRuntimeControls() {
             .label = "checkbox",
             .current = true,
             .defaultValue = false,
-            .apply = [](bool) {},
+            .apply = [](bool) { return AppliedEdit(); },
             .persistence = ControlPersistence{
                 .section = "Runtime",
                 .key = "Enabled",
@@ -106,7 +141,8 @@ void TestRuntimeControls() {
         jst::core::Config config;
         int overrideCalls = 0;
         RuntimeControl control = MakeSliderFloatControl(
-            kTenthStep, 1.1f, [](float) {}, "override", "Generic", "Value");
+            kTenthStep, 1.1f, [](float) { return AppliedEdit(); },
+            "override", "Generic", "Value");
         auto& slider = std::get<SliderFloatControl>(control);
         slider.persistence.overrideAction = [&](jst::core::Config& target) {
             ++overrideCalls;
@@ -137,7 +173,10 @@ void TestRuntimeControls() {
         controls.emplace_back(MakeSliderFloatControl(
             kTenthStep,
             1.5f,
-            [&](float) { ++applies; },
+            [&](float) {
+                ++applies;
+                return AppliedEdit();
+            },
             "slider",
             "Reset",
             "Value"));
