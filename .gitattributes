@@ -1,0 +1,5 @@
+* text=auto eol=lf
+
+# Vendored SDK/library sources and generated assembler constants stay byte-for-byte.
+src/external/** -text
+src/hooks/tweak_hooks_slots.inc -text

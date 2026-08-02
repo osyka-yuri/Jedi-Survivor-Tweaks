@@ -13,6 +13,7 @@ Release/
 
 # IDE
 .vs/
+.vscode/
 *.user
 *.suo
 

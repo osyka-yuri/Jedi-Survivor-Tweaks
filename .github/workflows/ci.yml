@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration:
+          - Release
+          - ReleaseAddon
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build ${{ matrix.configuration }}|x64
+        run: >-
+          msbuild JediSurvivorTweaks.sln
+          /p:Configuration=${{ matrix.configuration }}
+          /p:Platform=x64
+          /t:Rebuild
+
+      - name: Run ${{ matrix.configuration }} tests
+        shell: pwsh
+        run: |
+          & ".\x64\${{ matrix.configuration }}\tests\JediSurvivorTweaks.Tests.exe"
+          if ($LASTEXITCODE -ne 0) {
+            throw "${{ matrix.configuration }} tests failed with exit code $LASTEXITCODE."
+          }
