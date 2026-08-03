@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-03
+
+### Added
+
+- **Max FPS control** — an optional frame-rate limit from 0 to 300, configurable in the INI and ReShade panel. A value of 0 removes the limit.
+- The ReShade panel now shows when a setting is still being applied or could not be applied.
+
+### Changed
+
+- **Console variables are now updated through Unreal Engine's `IConsoleVariable` interface** instead of being written directly to memory.
+- **Console-variable settings now wait until the game finishes loading its own settings**, preventing late startup initialization from overwriting the mod's values.
+- **Interpolated Rendering is now opt-in** and disabled by default. When disabled at startup, it leaves the game's existing setting untouched.
+- **Streaming Pool Auto** now waits for the game to select its pool size before locking the final safe value.
+- Configuration loading and saving are more robust: invalid values fall back to documented defaults without risking the existing INI.
+- Version-dependent settings remain disabled on unsupported game builds instead of being applied unsafely.
+
+### Fixed
+
+- Rejected live changes are no longer saved to the INI.
+- Dedicated tweak settings now take precedence over duplicate `[CVars]` entries without blocking unrelated custom variables.
+
 ## [1.4.2] - 2026-07-24
 
 ### Fixed
