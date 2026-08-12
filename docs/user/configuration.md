@@ -24,13 +24,13 @@ Multiplier controls accept values from `0.0` to `10.0`, except `AspectRatioUIFix
 
 ## Streaming pool
 
-`PoolSizeGB = auto` is recommended. During startup it lets the game select its pool, then freezes a valid final size. If the game does not provide one in time, the mod uses a conservative fallback.
+`PoolSizeGB = auto` is recommended. After the game begins running, the mod reads and locks the exact pool size selected by the game. If that one-time read is unavailable, fails, or reports a nonpositive value, Auto settles once on a runtime-only **2.00 GiB** fallback. The saved value remains `auto`: this does not retry, write the INI, or switch to Manual mode.
 
-You can instead enter a number such as `2.0` to request a manual size in GiB. On a detected dedicated GPU the mod limits manual and automatic locks to 70% of physical VRAM. If the active GPU cannot be identified, it keeps the compatible 12 GiB ceiling rather than guessing another adapter.
+You can instead enter a number such as `2.0` to request a manual size in GiB. On a detected dedicated GPU the mod limits manual locks to 70% of physical VRAM. If the active GPU cannot be identified, manual mode keeps the compatible 12 GiB ceiling rather than guessing another adapter. GPU limits never clamp normal Auto values or the exceptional Auto fallback.
 
 ## Frame-rate limit
 
-When MaxFPS is disabled at startup, the mod leaves the game's limit untouched. When enabled, its limit is applied after the game finishes loading its own settings so late startup work does not replace it. Live enable and target changes apply `TargetFPS`; live disable sets `t.MaxFPS` to `0`, which is Unreal's uncapped value.
+When MaxFPS is disabled at startup, the mod leaves the game's limit untouched. When enabled, its limit is applied after the game begins running and kept stable while startup finishes. Live enable and target changes apply `TargetFPS`; live disable sets `t.MaxFPS` to `0`, which is Unreal's uncapped value.
 
 The ReShade overlay treats an accepted edit as the desired setting immediately. An amber status means the game command is still pending; red means it failed later, and the explanation is shown in the panel. A late failure does not silently rewrite your saved choice.
 

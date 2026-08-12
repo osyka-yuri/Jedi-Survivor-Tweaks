@@ -4,397 +4,112 @@
 #include "test_check.hpp"
 
 #include <atomic>
-#include <barrier>
+#include <cmath>
 #include <limits>
-#include <thread>
-#include <utility>
-
-using jst::tweaks::EnginePoolObservation;
-using jst::tweaks::MakePoolSizePolicy;
-using jst::tweaks::PoolSizeGbToBytes;
-using jst::tweaks::StreamingPoolController;
-using jst::tweaks::StreamingPoolState;
+#include <string>
 
 namespace {
 
 constexpr uint64_t GiB(uint64_t value) {
-    return value * jst::core::kBytesPerGiB;
+    return value * jst::tweaks::kPoolSizeBytesPerGiB;
 }
 
-struct BoundController {
-    jst::core::StreamingPoolPayload payload{};
-    StreamingPoolController controller;
-
-    explicit BoundController(jst::tweaks::PoolSizePolicy policy = {})
-        : controller(std::move(policy)) {
-        controller.BindPayload(payload);
-    }
-
-    [[nodiscard]] uint64_t ForcedBytes() {
-        return std::atomic_ref<uint64_t>(payload.forcedBytes)
-            .load(std::memory_order_acquire);
-    }
-
-    [[nodiscard]] uint64_t CeilingBytes() {
-        return std::atomic_ref<uint64_t>(payload.captureCeilingBytes)
-            .load(std::memory_order_acquire);
-    }
-
-    [[nodiscard]] uint64_t FallbackBytes() {
-        return std::atomic_ref<uint64_t>(payload.fallbackBytes)
-            .load(std::memory_order_acquire);
-    }
-
-    [[nodiscard]] uint64_t FirstObservedBytes() {
-        return std::atomic_ref<uint64_t>(payload.firstObservedEngineBytes)
-            .load(std::memory_order_acquire);
-    }
-
-    bool PublishFirstObserved(uint64_t bytes) {
-        uint64_t expected = 0;
-        return std::atomic_ref<uint64_t>(payload.firstObservedEngineBytes)
-            .compare_exchange_strong(
-                expected, bytes, std::memory_order_acq_rel, std::memory_order_acquire);
-    }
-};
-
-void CheckPayloadMatchesSnapshot(BoundController& bound, const char* message) {
-    Check(bound.ForcedBytes() == bound.controller.Snapshot().lockedBytes, message);
+uint64_t PublishedBytes(jst::core::StreamingPoolPayload& payload) {
+    return std::atomic_ref<uint64_t>(payload.forcedBytes)
+        .load(std::memory_order_acquire);
 }
 
 } // namespace
 
 void TestStreamingPoolController() {
-    const auto p24 = MakePoolSizePolicy(GiB(24));
-    const auto p8 = MakePoolSizePolicy(GiB(8));
-    const auto p2 = MakePoolSizePolicy(GiB(2));
-
-    // Binding publishes policy without choosing a mode or forcing a size.
-    {
-        BoundController bound(p24);
-        const auto snapshot = bound.controller.Snapshot();
-        Check(snapshot.state == StreamingPoolState::Unconfigured,
-              "new bound controller remains unconfigured");
-        Check(bound.ForcedBytes() == 0, "binding leaves the forced size open");
-        Check(bound.CeilingBytes() == p24.limits.maximumBytes,
-              "binding publishes the GPU-aware capture ceiling");
-        Check(bound.FallbackBytes() == p24.limits.fallbackBytes,
-              "binding publishes the GPU-aware fallback");
-        Check(bound.FirstObservedBytes() == 0,
-              "binding does not manufacture an engine path sample");
-    }
-
-    // Manual state retains the request while publishing its normalized value.
-    {
-        BoundController bound(p24);
-        bound.controller.ArmManual(20.0f);
-        auto snapshot = bound.controller.Snapshot();
-        Check(snapshot.state == StreamingPoolState::Manual,
-              "manual arm constructs Manual state");
-        Check(NearlyEqual(snapshot.effectiveGb, 16.8f) &&
-                  NearlyEqual(snapshot.requestedManualGb, 20.0f),
-              "manual request is retained after GPU-policy normalization");
-        CheckPayloadMatchesSnapshot(bound, "manual state publishes its effective bytes");
-
-        Check(bound.controller.UpdatePolicy(p8), "lower manual policy is accepted");
-        Check(NearlyEqual(bound.controller.Snapshot().effectiveGb, 5.6f),
-              "lower policy immediately caps the manual lock");
-        CheckPayloadMatchesSnapshot(bound, "lower manual policy updates the payload");
-
-        Check(bound.controller.UpdatePolicy(p24), "higher manual policy is accepted");
-        Check(NearlyEqual(bound.controller.Snapshot().effectiveGb, 16.8f),
-              "higher policy restores the retained manual request");
-        const auto beforeNoOp = bound.ForcedBytes();
-        Check(!bound.controller.UpdatePolicy(p24), "identical policy is deduplicated");
-        Check(bound.ForcedBytes() == beforeNoOp,
-              "no-op policy leaves the forced value unchanged");
-
-        Check(bound.controller.UpdateManualSize(6.0f),
-              "manual edit republishes while Manual is active");
-        Check(bound.ForcedBytes() == PoolSizeGbToBytes(6.0f, p24.limits),
-              "manual edit updates the forced payload immediately");
-    }
+    using namespace jst::tweaks;
 
     {
-        BoundController bound(p24);
-        bound.controller.ArmManual(std::numeric_limits<float>::infinity());
-        const auto snapshot = bound.controller.Snapshot();
-        Check(NearlyEqual(snapshot.requestedManualGb, p24.limits.FallbackGb()) &&
-                  NearlyEqual(snapshot.effectiveGb, p24.limits.FallbackGb()),
-              "non-finite manual request is sanitized to policy fallback");
-    }
-
-    // Initial Auto observes the natural streaming path without forcing a size.
-    {
-        BoundController bound(p24);
-        bound.controller.ArmAuto();
-        Check(bound.controller.Snapshot().state ==
-                  StreamingPoolState::WaitingForEngine &&
-                  bound.controller.Snapshot().lockedBytes == 0 &&
-                  bound.ForcedBytes() == 0,
-              "initial Auto leaves the streaming hook without a forced lock");
-        Check(bound.controller.UpdatePolicy(p8),
-              "passive Auto accepts a late GPU policy");
-        Check(bound.controller.Snapshot().lockedBytes == 0 &&
-                  bound.ForcedBytes() == 0 &&
-                  bound.CeilingBytes() == p8.limits.maximumBytes,
-              "policy updates preserve the passive startup gate");
-    }
-
-    // Runtime Auto waits behind the existing safe lock and still gives an
-    // in-range CVar first priority.
-    {
-        BoundController bound(p24);
-        bound.controller.ArmManual(2.0f);
-        Check(bound.PublishFirstObserved(3ull * jst::core::kBytesPerGiB),
-              "test path sample wins the empty observation slot");
-        bound.controller.ArmAuto();
-
-        const auto waiting = bound.controller.Snapshot();
-        Check(waiting.state == StreamingPoolState::WaitingForEngine,
-              "ArmAuto waits for the CVar even with an existing path sample");
-        Check(bound.ForcedBytes() == PoolSizeGbToBytes(2.0f, p24.limits),
-              "runtime Auto keeps the previous safe manual size while waiting");
-
-        Check(bound.controller.ObserveEnginePoolMb(4000) ==
-                  EnginePoolObservation::LockedFromCVar,
-              "in-range CVar wins over a pre-existing path sample");
-        const auto locked = bound.controller.Snapshot();
-        Check(locked.state == StreamingPoolState::LockedFromCVar &&
-                  locked.enginePoolMb == 4000 &&
-                  locked.lockedBytes == 4000ull * jst::core::kBytesPerMiB,
-              "CVar lock preserves the exact engine MiB value");
-        Check(bound.FirstObservedBytes() == 3ull * jst::core::kBytesPerGiB,
-              "CVar selection does not clear the process-lifetime path sample");
-        CheckPayloadMatchesSnapshot(bound, "CVar winner is coherent with the payload");
-        Check(bound.controller.ObserveEnginePoolMb(2048) == EnginePoolObservation::Inactive,
-              "later CVar observations are inactive after a CVar lock");
-    }
-
-    // Invalid CVar values preserve the passive startup gate and expose the
-    // latest rejection.
-    {
-        BoundController bound(p24);
-        bound.controller.ArmAuto();
-        const auto temporary = bound.ForcedBytes();
-        Check(bound.controller.ObserveEnginePoolMb(0) == EnginePoolObservation::NotReady,
-              "zero CVar is reported as not ready");
-        Check(!bound.controller.TryAdoptPathSample(),
-              "missing path sample cannot resolve Auto");
-        Check(bound.controller.ObserveEnginePoolMb(100) ==
-                  EnginePoolObservation::RejectedBelowMinimum,
-              "sub-minimum CVar is rejected explicitly");
-        Check(bound.controller.ObserveEnginePoolMb(20'000) ==
-                  EnginePoolObservation::RejectedAboveMaximum,
-              "over-ceiling CVar is rejected explicitly");
-        const auto snapshot = bound.controller.Snapshot();
-        Check(snapshot.state == StreamingPoolState::WaitingForEngine &&
-                  snapshot.lastRejectedCandidate &&
-                  snapshot.lastRejectedCandidate->sizeMb == 20'000,
-              "rejected CVar leaves Auto waiting with rejection diagnostics");
-        Check(bound.ForcedBytes() == temporary,
-              "invalid CVar observations preserve the current waiting gate");
-    }
-
-    // A path sample is secondary after an unusable CVar tick.
-    {
-        BoundController bound(p24);
-        bound.controller.ArmAuto();
-        Check(bound.controller.ObserveEnginePoolMb(7'471'215) ==
-                  EnginePoolObservation::RejectedAboveMaximum,
-              "absurd CVar is rejected before considering the path sample");
-        const uint64_t sample = 3000ull * jst::core::kBytesPerMiB;
-        Check(bound.PublishFirstObserved(sample), "path publishes its first valid sample");
-        Check(bound.controller.TryAdoptPathSample(),
-              "path sample resolves Auto after an unusable CVar");
-        Check(bound.controller.Snapshot().state ==
-                  StreamingPoolState::LockedFromPathSample &&
-                  bound.ForcedBytes() == sample,
-              "path sample becomes the exact forced lock");
-        Check(bound.controller.ObserveEnginePoolMb(3000) ==
-                  EnginePoolObservation::LockedFromPathSample,
-              "later CVar tick reports an existing path-sample winner");
-    }
-
-    // Timeout adopts a safe sample, otherwise it publishes the policy fallback.
-    {
-        BoundController bound(p2);
-        bound.controller.ArmAuto();
-        bound.controller.OnAutoTimeout();
-        auto snapshot = bound.controller.Snapshot();
-        Check(snapshot.state == StreamingPoolState::Fallback &&
-                  NearlyEqual(snapshot.effectiveGb, 1.4f),
-              "timeout without a sample publishes low-VRAM fallback");
-        CheckPayloadMatchesSnapshot(bound, "timeout fallback is coherent with the payload");
-        bound.controller.OnAutoTimeout();
-        const auto afterSecondTimeout = bound.controller.Snapshot();
-        Check(afterSecondTimeout.state == snapshot.state &&
-                  afterSecondTimeout.lockedBytes == snapshot.lockedBytes &&
-                  NearlyEqual(afterSecondTimeout.effectiveGb, snapshot.effectiveGb),
-              "timeout is idempotent outside the waiting state");
-    }
-
-    {
-        BoundController bound(p24);
-        bound.controller.ArmManual(5.0f);
-        bound.controller.ArmAuto();
-        Check(bound.PublishFirstObserved(4ull * jst::core::kBytesPerGiB),
-              "timeout scenario publishes a path sample");
-        bound.controller.OnAutoTimeout();
-        Check(bound.controller.Snapshot().state ==
-                  StreamingPoolState::LockedFromPathSample &&
-                  bound.ForcedBytes() == 4ull * jst::core::kBytesPerGiB,
-              "timeout adopts a valid path sample before fallback");
-    }
-
-    {
-        BoundController bound(p8);
-        bound.controller.ArmAuto();
-        Check(bound.PublishFirstObserved(8ull * jst::core::kBytesPerGiB),
-              "test publishes an over-policy path sample");
-        bound.controller.OnAutoTimeout();
-        Check(bound.controller.Snapshot().state == StreamingPoolState::Fallback &&
-                  bound.ForcedBytes() == p8.limits.fallbackBytes,
-              "timeout rejects an out-of-range path sample");
-        Check(bound.FirstObservedBytes() == 8ull * jst::core::kBytesPerGiB,
-              "rejected process-lifetime sample remains immutable");
-    }
-
-    // Mode toggles retain manual intent without opening the forced gate.
-    {
-        BoundController bound(p24);
-        bound.controller.ArmManual(5.0f);
-        bound.controller.ArmAuto();
-        Check(bound.ForcedBytes() == PoolSizeGbToBytes(5.0f, p24.limits),
-              "manual-to-auto keeps the prior safe value as its hold");
-        Check(!bound.controller.UpdateManualSize(7.0f),
-              "editing retained manual value does not leave Auto");
-        Check(NearlyEqual(bound.controller.Snapshot().requestedManualGb, 7.0f),
-              "Auto retains the edited manual request");
-        bound.controller.ArmManual(bound.controller.Snapshot().requestedManualGb);
-        Check(NearlyEqual(bound.controller.Snapshot().effectiveGb, 7.0f),
-              "return to Manual restores the retained request");
-    }
-
-    // Policy changes preserve valid locks and repair unsafe states.
-    {
-        BoundController bound(p24);
-        Check(bound.controller.UpdatePolicy(p8),
-              "unconfigured controller accepts a new GPU policy");
-        Check(bound.controller.Snapshot().state == StreamingPoolState::Unconfigured &&
-                  bound.ForcedBytes() == 0 &&
-                  bound.CeilingBytes() == p8.limits.maximumBytes &&
-                  bound.FallbackBytes() == p8.limits.fallbackBytes,
-              "unconfigured policy update keeps the gate open and republishes policy");
-    }
-
-    {
-        BoundController bound(p8);
-        bound.controller.ArmAuto();
-        Check(bound.controller.ObserveEnginePoolMb(3001) ==
-                  EnginePoolObservation::LockedFromCVar,
-              "non-grid CVar locks under the 8 GiB policy");
-        const uint64_t exact = 3001ull * jst::core::kBytesPerMiB;
-        Check(bound.controller.UpdatePolicy(p24), "policy increase is published");
-        Check(bound.controller.Snapshot().state == StreamingPoolState::LockedFromCVar &&
-                  bound.ForcedBytes() == exact,
-              "policy increase preserves an exact valid CVar lock");
-        Check(bound.controller.UpdatePolicy(p2), "policy reduction is published");
-        Check(bound.controller.Snapshot().state == StreamingPoolState::Fallback &&
-                  bound.ForcedBytes() == p2.limits.fallbackBytes,
-              "policy reduction replaces an unsafe CVar lock with fallback");
-    }
-
-    {
-        BoundController bound(p8);
-        Check(bound.PublishFirstObserved(3ull * jst::core::kBytesPerGiB),
-              "path-policy scenario publishes a valid sample");
-        bound.controller.ArmAuto();
-        Check(bound.controller.ObserveEnginePoolMb(-1) ==
-                  EnginePoolObservation::NotReady &&
-                  bound.controller.TryAdoptPathSample(),
-              "invalid CVar allows the path sample to lock Auto");
-        Check(bound.controller.UpdatePolicy(p24), "path lock accepts a higher policy");
-        Check(bound.controller.Snapshot().state ==
-                  StreamingPoolState::LockedFromPathSample &&
-                  bound.ForcedBytes() == 3ull * jst::core::kBytesPerGiB,
-              "higher policy preserves a valid path-sample lock");
-        Check(bound.controller.UpdatePolicy(p2), "path lock accepts a lower policy");
-        Check(bound.controller.Snapshot().state == StreamingPoolState::Fallback &&
-                  bound.ForcedBytes() == p2.limits.fallbackBytes,
-              "lower policy replaces an unsafe path-sample lock");
-    }
-
-    {
-        BoundController bound(p24);
-        bound.controller.ArmManual(5.0f);
-        bound.controller.ArmAuto();
-        Check(bound.controller.UpdatePolicy(p2),
-              "waiting Auto accepts a lower GPU policy");
-        Check(bound.controller.Snapshot().state == StreamingPoolState::WaitingForEngine &&
-                  bound.ForcedBytes() == p2.limits.fallbackBytes,
-              "waiting policy reduction repairs an out-of-range hold");
-        Check(bound.CeilingBytes() == p2.limits.maximumBytes &&
-                  bound.FallbackBytes() == p2.limits.fallbackBytes,
-              "waiting policy reduction republishes both policy words");
-    }
-
-    {
-        BoundController bound(p2);
-        bound.controller.ArmAuto();
-        bound.controller.OnAutoTimeout();
-        Check(bound.controller.UpdatePolicy(p24), "fallback accepts a higher policy");
-        Check(bound.controller.Snapshot().state == StreamingPoolState::Fallback &&
-                  bound.ForcedBytes() == p24.limits.fallbackBytes,
-              "Fallback state republishes the new policy fallback");
-    }
-
-    {
-        StreamingPoolController controller(p24);
-        controller.ArmAuto();
-        Check(controller.ObserveEnginePoolMb(3000) ==
-                  EnginePoolObservation::LockedFromCVar,
-              "unbound controller can resolve Auto from a valid CVar");
-        jst::core::StreamingPoolPayload payload{};
+        jst::core::StreamingPoolPayload payload;
+        StreamingPoolController controller(MakePoolSizePolicy(GiB(2)));
         controller.BindPayload(payload);
-        Check(std::atomic_ref<uint64_t>(payload.forcedBytes)
-                      .load(std::memory_order_acquire) ==
-                  3000ull * jst::core::kBytesPerMiB,
-              "late binding publishes the resolved controller lock");
+        controller.ArmAuto(1);
+        const auto exact = controller.CompleteAutoRead(1, 3000);
+        Check(exact.completion == StreamingPoolAutoCompletion::Exact &&
+                  exact.snapshot.state == StreamingPoolState::Automatic &&
+                  exact.snapshot.enginePoolMb == 3000 &&
+                  PublishedBytes(payload) ==
+                      3000ull * kPoolSizeBytesPerMiB,
+              "automatic mode publishes the exact 3000 MB engine value without GPU clamping");
+
+        controller.ArmAuto(2);
+        const auto nonGiB = controller.CompleteAutoRead(2, 3073);
+        Check(nonGiB.completion == StreamingPoolAutoCompletion::Exact &&
+                  PublishedBytes(payload) ==
+                      3073ull * kPoolSizeBytesPerMiB,
+              "automatic mode preserves every observed engine MiB exactly");
+
+        Check(controller.UpdatePolicy(MakePoolSizePolicy(GiB(1))) &&
+                  PublishedBytes(payload) ==
+                      3073ull * kPoolSizeBytesPerMiB,
+              "adapter policy changes never modify automatic values");
     }
 
-    // Concurrent detour writers can publish exactly one process-lifetime sample.
     {
-        BoundController bound(p24);
-        constexpr uint64_t first = 2049ull * jst::core::kBytesPerMiB;
-        constexpr uint64_t second = 3073ull * jst::core::kBytesPerMiB;
-        bool firstWon = false;
-        bool secondWon = false;
-        std::barrier start{3};
-        std::thread firstWriter([&] {
-            start.arrive_and_wait();
-            firstWon = bound.PublishFirstObserved(first);
-        });
-        std::thread secondWriter([&] {
-            start.arrive_and_wait();
-            secondWon = bound.PublishFirstObserved(second);
-        });
-        start.arrive_and_wait();
-        firstWriter.join();
-        secondWriter.join();
+        jst::core::StreamingPoolPayload payload;
+        StreamingPoolController controller(MakePoolSizePolicy(GiB(1)));
+        controller.BindPayload(payload);
+        controller.ArmAuto(10);
+        const auto rejected = controller.CompleteAutoRead(
+            10, std::unexpected(std::string("read rejected")));
+        Check(rejected.completion == StreamingPoolAutoCompletion::Fallback &&
+                  rejected.snapshot.state == StreamingPoolState::AutomaticFallback &&
+                  PublishedBytes(payload) == 2ull * kPoolSizeBytesPerGiB &&
+                  FormatStreamingPoolStatus(rejected.snapshot).find(
+                      "Auto fallback: 2.00 GB") != std::string::npos,
+              "a rejected automatic read converges once to the exact runtime-only 2 GiB fallback");
 
-        const uint64_t winner = bound.FirstObservedBytes();
-        Check(firstWon != secondWon && (winner == first || winner == second),
-              "concurrent path sampling has exactly one valid first writer");
-        Check(!bound.PublishFirstObserved(4ull * jst::core::kBytesPerGiB) &&
-                  bound.FirstObservedBytes() == winner,
-              "later path samples cannot overwrite the first observation");
+        controller.ArmAuto(11);
+        const auto zero = controller.CompleteAutoRead(11, 0);
+        controller.ArmAuto(12);
+        const auto negative = controller.CompleteAutoRead(12, -1);
+        Check(zero.completion == StreamingPoolAutoCompletion::Fallback &&
+                  negative.completion == StreamingPoolAutoCompletion::Fallback &&
+                  PublishedBytes(payload) == 2ull * kPoolSizeBytesPerGiB,
+              "zero and negative automatic values use the same one-shot fallback");
+    }
 
-        bound.controller.ArmAuto();
-        Check(bound.controller.ObserveEnginePoolMb(-1) ==
-                  EnginePoolObservation::NotReady,
-              "invalid CVar leaves the sampled Auto source available");
-        Check(bound.controller.TryAdoptPathSample() && bound.ForcedBytes() == winner,
-              "controller adopts the immutable concurrent sample exactly");
+    {
+        jst::core::StreamingPoolPayload payload;
+        StreamingPoolController controller(MakePoolSizePolicy(GiB(24)));
+        controller.BindPayload(payload);
+        controller.ArmManual(20, 6.0f);
+        controller.ArmAuto(21);
+        Check(controller.Snapshot().state == StreamingPoolState::WaitingForEngine &&
+                  PublishedBytes(payload) == GiB(6),
+              "manual-to-auto retains its old forced value only while the read is pending");
+        const auto exact = controller.CompleteAutoRead(21, 4096);
+        Check(exact.completion == StreamingPoolAutoCompletion::Exact &&
+                  PublishedBytes(payload) == GiB(4),
+              "the current automatic completion replaces the temporary manual hold");
+
+        controller.ArmAuto(22);
+        controller.ArmManual(23, 3.0f);
+        const auto stale = controller.CompleteAutoRead(22, 8192);
+        Check(stale.completion == StreamingPoolAutoCompletion::Stale &&
+                  controller.Snapshot().state == StreamingPoolState::Manual &&
+                  PublishedBytes(payload) == GiB(3),
+              "a stale automatic completion is a no-op");
+    }
+
+    {
+        jst::core::StreamingPoolPayload payload;
+        StreamingPoolController controller(MakePoolSizePolicy(GiB(8)));
+        controller.BindPayload(payload);
+        controller.ArmManual(30, 4.0f);
+        Check(PublishedBytes(payload) == GiB(4),
+              "manual values inside the active policy publish exactly");
+        Check(controller.UpdatePolicy(MakePoolSizePolicy(GiB(2))) &&
+                  PublishedBytes(payload) ==
+                      14ull * kPoolSizeBytesPerGiB / 10,
+              "only Manual mode is recomputed when the adapter policy changes");
+        controller.ArmManual(31, std::numeric_limits<float>::quiet_NaN());
+        Check(NearlyEqual(controller.Snapshot().effectiveGb, 1.4f),
+              "non-finite manual input resolves through the manual policy only");
     }
 }

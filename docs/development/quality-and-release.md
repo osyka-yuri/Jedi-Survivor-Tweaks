@@ -38,11 +38,10 @@ Record the timestamp, image size, Tick RVA, signature uniqueness, and executable
 When a release is explicitly approved for in-game testing, verify at minimum:
 
 - The first post-Tick barrier opens before the main menu.
-- The later game-settings barrier opens only from the exact `t.MaxFPS` object's `SetByScalability` call on the recorded game thread, without a timer or reapply loop.
 - Startup-disabled MaxFPS and InterpolatedRendering perform no CVar work.
-- Startup-enabled MaxFPS applies its configured target after the game-settings barrier opens and remains set through the main menu.
+- Startup-enabled MaxFPS applies on the first post-Tick pass; value changes during the following 15 seconds are detected and corrected, while `LastSetBy`-only changes are ignored.
 - Live MaxFPS enable, target update, uncapped disable, and pending/error overlay states behave as documented.
-- Streaming pool Auto remains unforced before the game-settings barrier, then adopts the final CVar value, a valid path sample, or its fallback in that order.
+- Streaming pool Auto remains unforced until its one-shot post-Tick read, then locks the exact `r.Streaming.PoolSize` value selected by the game. Verify a rejected, invalid, or nonpositive read reports `Auto fallback: 2.00 GB` without retrying, persisting, or changing to Manual.
 - Hook-based display and camera features work at their supported resolutions.
 - ReShade and ASI are tested independently when both loaders are available.
 

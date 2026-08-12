@@ -4,48 +4,44 @@
 #include "streaming_pool_policy.hpp"
 
 #include <cstdint>
+#include <expected>
 #include <mutex>
-#include <optional>
 #include <string>
 
 namespace jst::tweaks {
 
 enum class StreamingPoolState : uint8_t {
     Unconfigured,
-    Manual,
     WaitingForEngine,
-    LockedFromCVar,
-    LockedFromPathSample,
+    Automatic,
+    AutomaticFallback,
+    Manual,
+};
+
+enum class StreamingPoolAutoCompletion : uint8_t {
+    Exact,
     Fallback,
-};
-
-enum class EnginePoolObservation : uint8_t {
-    NotReady,
-    RejectedBelowMinimum,
-    RejectedAboveMaximum,
-    LockedFromCVar,
-    LockedFromPathSample,
-    Inactive,
-};
-
-struct RejectedEnginePoolCandidate {
-    int32_t sizeMb = 0;
-    EnginePoolCandidateValidity reason = EnginePoolCandidateValidity::NotReady;
-
-    bool operator==(const RejectedEnginePoolCandidate&) const = default;
+    Stale,
 };
 
 struct StreamingPoolSnapshot {
     StreamingPoolState state = StreamingPoolState::Unconfigured;
     uint64_t lockedBytes = 0;
-    float effectiveGb = kPoolSizeDefaultFallbackGb;
-    float requestedManualGb = kPoolSizeDefaultFallbackGb;
+    float effectiveGb = kPoolSizeDefaultGb;
+    float requestedManualGb = kPoolSizeDefaultGb;
     int32_t enginePoolMb = 0;
-    std::optional<RejectedEnginePoolCandidate> lastRejectedCandidate;
+    uint64_t generation = 0;
     PoolSizePolicy policy{};
 };
 
-[[nodiscard]] std::string FormatStreamingPoolStatus(const StreamingPoolSnapshot& snapshot);
+struct StreamingPoolAutoReadResult {
+    StreamingPoolAutoCompletion completion = StreamingPoolAutoCompletion::Stale;
+    StreamingPoolSnapshot snapshot{};
+    std::string diagnostic;
+};
+
+[[nodiscard]] std::string FormatStreamingPoolStatus(
+    const StreamingPoolSnapshot& snapshot);
 
 class StreamingPoolController final {
 public:
@@ -54,48 +50,27 @@ public:
     void BindPayload(jst::core::StreamingPoolPayload& payload);
     [[nodiscard]] bool UpdatePolicy(PoolSizePolicy policy);
 
-    void ArmManual(float requestedPoolSizeGb);
-    void ArmAuto();
-    [[nodiscard]] bool UpdateManualSize(float requestedPoolSizeGb);
-
-    [[nodiscard]] EnginePoolObservation ObserveEnginePoolMb(int32_t poolSizeMb);
-    void OnAutoTimeout();
-    // Secondary Auto source after an unusable CVar tick or timeout.
-    [[nodiscard]] bool TryAdoptPathSample();
+    void ArmAuto(uint64_t generation);
+    [[nodiscard]] StreamingPoolAutoReadResult CompleteAutoRead(
+        uint64_t generation,
+        std::expected<int32_t, std::string> enginePoolMb);
+    void ArmManual(uint64_t generation, float requestedPoolSizeGb);
 
     [[nodiscard]] StreamingPoolSnapshot Snapshot() const;
-    [[nodiscard]] bool IsWaitingForEngine() const;
 
 private:
-    class PayloadPort final {
-    public:
-        void Bind(jst::core::StreamingPoolPayload& payload) noexcept;
-        void StoreForced(uint64_t value) const noexcept;
-        void PublishPolicy(uint64_t ceiling, uint64_t fallback) const noexcept;
-        [[nodiscard]] uint64_t LoadFirstObserved() const noexcept;
-
-    private:
-        jst::core::StreamingPoolPayload* m_payload = nullptr;
-    };
-
-    // Caller holds m_mutex for every method suffixed Locked.
-    void PublishPolicyLocked() const noexcept;
-    void EnterAutoWaitingLocked();
-    void PublishWaitingStateLocked();
-    void PublishLockLocked(uint64_t bytes, StreamingPoolState state, int32_t engineMb = 0);
-    void PublishFallbackLocked();
-    [[nodiscard]] bool TryAdoptPathSampleLocked();
-    void RecordRejectionLocked(int32_t poolSizeMb, EnginePoolCandidateValidity reason);
+    void PublishLocked(uint64_t bytes) const noexcept;
+    void PublishManualLocked();
 
     PoolSizePolicy m_policy;
-    PayloadPort m_payload;
+    jst::core::StreamingPoolPayload* m_payload = nullptr;
     mutable std::mutex m_mutex;
     StreamingPoolState m_state = StreamingPoolState::Unconfigured;
     uint64_t m_lockedBytes = 0;
-    float m_effectiveGb = kPoolSizeDefaultFallbackGb;
-    float m_requestedManualGb = kPoolSizeDefaultFallbackGb;
+    float m_effectiveGb = kPoolSizeDefaultGb;
+    float m_requestedManualGb = kPoolSizeDefaultGb;
     int32_t m_enginePoolMb = 0;
-    std::optional<RejectedEnginePoolCandidate> m_lastRejectedCandidate;
+    uint64_t m_generation = 0;
 };
 
 } // namespace jst::tweaks

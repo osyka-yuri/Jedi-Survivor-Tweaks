@@ -25,33 +25,33 @@ Runtime callbacks return `Unchanged`, `Applied`, `Queued`, or `Rejected`. The ov
 
 ## Game-thread execution
 
-Binary scanning and CVar object resolution run away from the game thread. Engine object reads, setters, watches, and user callbacks run only from the post-`FEngineLoop::Tick` dispatcher.
+Binary scanning and CVar object resolution run away from the game thread. Engine object reads, setters, and user callbacks run only from the post-`FEngineLoop::Tick` dispatcher.
 
-Startup has two event-driven barriers. The first completed Tick identifies the game thread. Replay-original observers on the exact `t.MaxFPS` object then detect the game's later `SetByScalability` settings pass on that thread; Console writes and calls from other threads or objects cannot open the barrier. On the following post-Tick, queued CVar commands and watch deadlines are released together. No fixed delay, polling loop, watchdog, or automatic reapply participates in readiness.
+The first completed Tick identifies the game thread and opens the only startup barrier. Queued commands and one-shot reads are then executed from post-Tick passes. Every unresolved name cohort accepted before that barrier receives the same immutable deadline at the barrier; a later cohort receives its own acceptance-time deadline, and attaching more work never extends either. Resolver terminal errors extract the cohort and schedule its callbacks exactly once for the next post-Tick pass; callbacks are never invoked by the resolver.
 
-The CVar cache, override table, and watch registry use one ASCII case-insensitive name contract. `ResolvedCVar` stores the object, string setter, and declarative read layout. External references are dereferenced again before every read. Object, vtable setter identity, and read address are validated immediately before use.
+A bounded startup reconciler compares the stored value of each startup-written CVar every 100 ms for 15 seconds. It reapplies only values that changed, never retries a failed setter, and does not inspect `LastSetBy` when deciding whether to act. The target set is frozen at the first Tick; an explicit later command cancels startup monitoring for that CVar. Per-target permits make a live command win before a correction setter begins, or cause one current live command to run in the same post-Tick tail when it arrives during that setter.
 
-Ordinary CVar commands are one-shot and latest-value-wins. Queue acceptance produces a ticket; the later Unreal call completes it as applied or failed. A failed setter is not retried. Setters and callbacks execute without the cache mutex, and generation checks protect reentrant replacement.
+The CVar cache, override table, reconciler, and managed-claim set use one ASCII case-insensitive name contract. `ResolvedCVar` stores the object, string setter, and declarative read layout. External references are dereferenced again before every read. Object, vtable setter identity, and read address are validated immediately before use.
+
+Ordinary CVar commands are one-shot and latest-value-wins. Queue acceptance produces a ticket; the later Unreal call completes it as applied or failed. Public write requests are typed (`wstring`, `int32`, or finite `float`), then serialized atomically for the complete batch before the cache mutex is acquired. A failed setter is not retried. Setters and callbacks execute without the cache mutex, and generation checks protect reentrant replacement.
 
 `Superseded` is the neutral completion of a stale command, not a failure. Runtime status follows only the latest ticket owned by a control. Related managed settings use an all-or-none admission batch; individual Unreal setters still complete independently and retain their own diagnostics.
 
 Specialized controls claim the CVar names they manage for the current process. A managed command replaces an older pending custom command. A conflicting `[CVars]` item is skipped with a warning, while all non-conflicting custom items continue through the ordinary per-item queue. A specialized tweak that is disabled at startup and issues no command makes no claim.
 
-Watch subscriptions and the registry share a cancellation control block. `Reset()` therefore remains a join barrier after concurrent registry clearing has detached the indexed entry.
-
 ## MaxFPS commands
 
-MaxFPS uses the same one-shot, latest-value-wins command path as other CVar settings. Startup enable queues the selected target behind the game-settings barrier. Live target changes use the normal next-post-Tick path, and live disable queues `0` (uncapped). Startup disable and process shutdown perform no engine write.
+MaxFPS uses the same one-shot, latest-value-wins command path as other CVar settings. Startup enable queues the selected target for the first post-Tick pass and participates in the bounded startup reconciliation window. Live target changes use the normal next-post-Tick path, and live disable queues `0` (uncapped). Startup disable and process shutdown perform no engine write.
 
 `GraphicalTweaks.Enabled = false` is also neutral at startup: it queues no sharpening, chromatic-aberration, or tonemapper writes. ReShade may still issue an individual managed command when the user explicitly edits one of those live controls.
 
 ## Streaming pool startup
 
-In Auto mode the streaming hook is installed with no persistent forced size. It observes the game's natural streaming-path sample while the shared CVar watch waits behind the game-settings barrier; the existing GPU-aware safety ceiling still applies to implausibly large samples. After the barrier, a valid final `r.Streaming.PoolSize` has priority, followed by the captured path sample and then the fallback. Runtime mode changes retain an existing safe lock while a replacement is selected.
+In Auto mode the streaming hook is installed with no forced size. A one-shot read captures `r.Streaming.PoolSize` on the first post-Tick pass after its CVar object is resolved and publishes that exact engine-selected value to the hook payload. A rejected, failed, invalid, or nonpositive one-shot read terminates Auto once at a runtime-only 2 GiB fallback; it is not persisted, retried, or converted to Manual. Runtime Manual-to-Auto changes retain the previous lock only until that generation completes. GPU-aware limits and adapter updates apply only to explicit Manual values. The C++/MASM payload contains only an aligned `forcedBytes` word; there is no watch, path sample, or ASM policy state.
 
 ## Dispatcher and shutdown
 
-The CVar runtime coordinator owns registration, resolution, installation, rollback, and shutdown of the Tick dispatcher and game-settings barrier as one service. Failure in either hook group removes both groups and marks CVar access unavailable; independent tweak hooks continue through their own lifecycle.
+The CVar runtime coordinator owns registration, resolution, installation, rollback, and shutdown of the Tick dispatcher. A dispatcher failure removes its service hook and marks CVar access unavailable; independent tweak hooks continue through their own lifecycle.
 
 The Tick dispatcher counts admitted callbacks independently from detour entry. Returning C++ detours use a process-lifetime gateway gate: one atomic state transition either admits and counts the call before it can enter DLL code, or bypasses the closed detour through the retained original trampoline. Shutdown closes admission, restores the splice through the suspended-thread patching path, and waits for every admitted call. Unregistration preserves the hook and propagates the error if the original bytes cannot be restored.
 
@@ -61,7 +61,7 @@ Application shutdown follows this order:
 2. Close dispatcher callback admission.
 3. Stop background graphics services.
 4. Shut down tweaks in reverse order without issuing shutdown CVar writes.
-5. Let the CVar coordinator remove both service-hook groups and stop/join the CVar system.
+5. Let the CVar coordinator remove the dispatcher hook and stop/join the CVar system.
 6. Remove remaining independent hooks.
 7. Close the logger.
 
@@ -75,7 +75,8 @@ Saving creates a unique sibling temp file, flushes it through `FlushFileBuffers`
 
 - No engine API call is allowed from the resolver thread.
 - No cache mutex may be held across an engine setter or user callback.
-- Startup CVar setters and watches must remain closed until both startup barriers open.
+- Startup CVar setters and one-shot reads must remain closed until the first completed Tick.
+- Startup reconciliation is value-only, bounded to 15 seconds, and excludes specialized CVar owners.
 - Startup-disabled MaxFPS and InterpolatedRendering must not create resolver work.
 - Shutdown does not issue an extra MaxFPS command.
 - Incompatible executable detection fails CVar access closed without disabling independent hook tweaks.

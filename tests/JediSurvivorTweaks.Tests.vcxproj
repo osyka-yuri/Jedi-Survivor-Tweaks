@@ -59,12 +59,11 @@
     <ClCompile Include="streaming_pool_controller_tests.cpp" />
     <ClCompile Include="pool_size_setting_tests.cpp" />
     <ClCompile Include="cvar_resolver_tests.cpp" />
+    <ClCompile Include="cvar_startup_reconciler_tests.cpp" />
     <ClCompile Include="cvar_writer_tests.cpp" />
-    <ClCompile Include="cvar_watch_tests.cpp" />
     <ClCompile Include="managed_cvar_tests.cpp" />
     <ClCompile Include="cvar_runtime_coordinator_tests.cpp" />
     <ClCompile Include="game_thread_dispatcher_tests.cpp" />
-    <ClCompile Include="game_settings_barrier_tests.cpp" />
     <ClCompile Include="max_fps_tests.cpp" />
     <ClCompile Include="interpolated_rendering_tests.cpp" />
     <ClCompile Include="tweak_manager_tests.cpp" />
@@ -82,10 +81,9 @@
     <ClCompile Include="..\src\core\pe_utils.cpp" />
     <ClCompile Include="..\src\core\cvar_resolver.cpp" />
     <ClCompile Include="..\src\core\cvar_scanner.cpp" />
+    <ClCompile Include="..\src\core\cvar_startup_reconciler.cpp" />
     <ClCompile Include="..\src\core\cvar_system.cpp" />
     <ClCompile Include="..\src\core\cvar_runtime_coordinator.cpp" />
-    <ClCompile Include="..\src\core\cvar_watch_registry.cpp" />
-    <ClCompile Include="..\src\core\game_settings_barrier.cpp" />
     <ClCompile Include="..\src\core\game_thread_dispatcher.cpp" />
     <ClCompile Include="..\src\core\graphics_adapter_service.cpp" />
     <ClCompile Include="..\src\core\import_address_hook.cpp" />

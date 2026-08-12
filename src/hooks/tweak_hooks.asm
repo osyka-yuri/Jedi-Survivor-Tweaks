@@ -6,21 +6,14 @@
 ;   [r11 + 8]  float      multiplier      (4 bytes)
 ;   [r11 + 12] float      one             (4 bytes, constant 1.0f)
 ;   [r11 + 16] uint64_t   forcedBytes               (8 bytes, C++-owned lock)
-;   [r11 + 24] uint64_t   captureCeilingBytes       (8 bytes, capture ceiling)
-;   [r11 + 32] uint64_t   fallbackBytes             (8 bytes, auto fallback)
-;   [r11 + 40] uint64_t   firstObservedEngineBytes  (8 bytes, first in-range sample)
-;   sizeof = 48, alignment = 16
+;   sizeof = 32, alignment = 16
 ;
 ; SLOT_* constants are generated from src/hooks/slots.def.
 
 EXTERN g_contexts : QWORD
 
-CONTEXT_SIZE EQU 48
+CONTEXT_SIZE EQU 32
 STREAMING_FORCED_OFFSET EQU 16
-STREAMING_CEILING_OFFSET EQU 24
-STREAMING_FALLBACK_OFFSET EQU 32
-STREAMING_FIRST_OBSERVED_OFFSET EQU 40
-STREAMING_MIN_BYTES EQU 20000000h
 INCLUDE tweak_hooks_slots.inc
 
 .CODE
@@ -134,19 +127,9 @@ CameraDistance_Detour ENDP
 ;   patch+9 : 48 8B 83 08 01 00 00 mov rax, [rbx+0108h]      (7)  -- recalc path
 ;   patch+16: <resume>                                       -- next original instr
 ;
-; Detour protocol — keep in sync with streaming_pool_controller.hpp /
-; streaming_pool_protocol.hpp:
-;   firstObservedEngineBytes stores the first original size in [min, ceiling],
-;   including while a forced lock is active. C++ never clears it.
+; Detour protocol — keep in sync with streaming_pool_protocol.hpp:
 ;   forcedBytes != 0  → forced lock: rdx = forcedBytes
 ;   forcedBytes == 0  → passthrough: rdx = original [rsp+40h]
-;   captureCeilingBytes → dynamic inclusive capture ceiling in bytes
-;   fallbackBytes       → effective auto fallback in bytes
-;
-; Capture policy (must match streaming_pool_protocol.hpp):
-;   min = 0x20000000   (0.5 GiB) — reject below (passthrough, no lock)
-;   max = captureCeilingBytes (70% dedicated VRAM or legacy 12 GiB)
-;   above max               — use fallbackBytes for this invocation, do not lock
 ;
 ; Stack: prologue push r11 shifts original [rsp+40h] → [rsp+48h].
 ; We always push rax (preserve al from CALL) → engine size at [rsp+50h].
@@ -157,30 +140,10 @@ StreamingPoolFix_Detour PROC PUBLIC
     push rax                            ; preserve al (CALL result for test al,al)
     mov  rdx, qword ptr [rsp + 50h]     ; original pool size [rsp+40h]
 
-    ; Capture the first in-range original engine size.
-    mov  rax, qword ptr [r11 + STREAMING_FIRST_OBSERVED_OFFSET]
-    test rax, rax
-    jnz  sample_complete
-    cmp  rdx, STREAMING_MIN_BYTES
-    jb   sample_complete
-    cmp  rdx, qword ptr [r11 + STREAMING_CEILING_OFFSET]
-    ja   sample_complete
-    xor  eax, eax
-    lock cmpxchg qword ptr [r11 + STREAMING_FIRST_OBSERVED_OFFSET], rdx
-
-sample_complete:
     mov  rax, qword ptr [r11 + STREAMING_FORCED_OFFSET]
     test rax, rax
-    jz   unforced_path
+    jz   payload_ready
     mov  rdx, rax
-    jmp  payload_ready
-
-unforced_path:
-    cmp  rdx, STREAMING_MIN_BYTES
-    jb   payload_ready
-    cmp  rdx, qword ptr [r11 + STREAMING_CEILING_OFFSET]
-    jbe  payload_ready
-    mov  rdx, qword ptr [r11 + STREAMING_FALLBACK_OFFSET]
 
 payload_ready:
     pop  rax

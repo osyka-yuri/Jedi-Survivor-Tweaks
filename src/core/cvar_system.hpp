@@ -3,12 +3,14 @@
 #include "cvar_name.hpp"
 #include "cvar_resolver.hpp"
 #include "cvar_scanner.hpp"
-#include "cvar_watch.hpp"
+#include "cvar_startup_reconciler.hpp"
 
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <expected>
+#include <functional>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -18,13 +20,12 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 #include <vector>
 
 namespace jst::core {
 
 class CVarSystem;
-class CVarWatchRegistry;
-class GameSettingsBarrier;
 
 #if defined(JST_UNIT_TESTS)
 class CVarSystemTestAccess;
@@ -98,7 +99,9 @@ struct CVarQueueResult {
 
 struct CVarWriteRequest {
     std::wstring name;
-    std::wstring value;
+    // The public request is typed. Text and the comparison representation are
+    // derived once by CVarSystem, before any cache state is mutated.
+    std::variant<std::wstring, int32_t, float> value;
 };
 
 struct CVarBatchResult {
@@ -119,12 +122,14 @@ enum class CVarSystemState : uint8_t {
 };
 
 /**
- * Resolves CVar objects away from the game thread. Engine reads, watch
- * callbacks, and setter commands all wait for both the first post-Tick and
- * the game's post-startup settings pass.
+ * Resolves CVar objects away from the game thread. Engine reads and setter
+ * commands execute after FEngineLoop::Tick returns.
  */
 class CVarSystem final {
 public:
+    using IntReadCallback =
+        std::function<void(std::expected<int32_t, std::string>)>;
+
     [[nodiscard]] static CVarSystem& Instance();
 
     [[nodiscard]] CVarQueueResult SetString(
@@ -147,7 +152,9 @@ public:
     // Reserves a name for an active specialized tweak that controls the value
     // without using the ordinary CVar writer (for example StreamingPoolFix).
     void ClaimManaged(std::wstring_view name);
-    [[nodiscard]] CVarWatchSubscription WatchInt(IntWatchRequest request);
+    [[nodiscard]] bool ReadIntOnce(
+        std::wstring_view name,
+        IntReadCallback callback);
 
     [[nodiscard]] std::expected<void, std::string> Start(
         std::chrono::milliseconds period = std::chrono::milliseconds(100));
@@ -159,10 +166,9 @@ public:
     [[nodiscard]] std::string UnavailableReason() const;
 
 private:
-    friend class GameSettingsBarrier;
-
     struct PendingWrite {
         std::wstring value;
+        CVarValueKind kind = CVarValueKind::Opaque;
         CVarCommandSource source = CVarCommandSource::Managed;
         uint64_t generation = 0;
         CVarCommandTicket ticket;
@@ -172,7 +178,8 @@ private:
         ScanEntry scanData;
         std::optional<ResolvedCVar> resolved;
         std::optional<PendingWrite> write;
-        std::chrono::steady_clock::time_point firstSeen{};
+        std::vector<IntReadCallback> intReads;
+        std::optional<std::chrono::steady_clock::time_point> deadline;
     };
 
     using Cache = std::unordered_map<
@@ -180,6 +187,18 @@ private:
         CVarEntry,
         CVarNameHash,
         CVarNameEqual>;
+
+    struct SerializedWrite {
+        std::wstring name;
+        std::wstring value;
+        CVarValueKind kind = CVarValueKind::Opaque;
+    };
+
+    struct ReadyReadBatch {
+        std::wstring name;
+        std::expected<int32_t, std::string> result;
+        std::vector<IntReadCallback> callbacks;
+    };
 
     CVarSystem();
     ~CVarSystem();
@@ -198,32 +217,51 @@ private:
     [[nodiscard]] static CVarQueueResult RejectedResult(
         std::string reason,
         CVarRejectionReason rejection);
-    [[nodiscard]] bool OpenGameSettingsBarrier();
-
-    [[nodiscard]] CVarQueueResult QueueWrite(
-        std::wstring_view name,
-        std::wstring value,
-        CVarCommandSource source);
+    [[nodiscard]] static std::expected<SerializedWrite, std::string>
+    SerializeRequest(const CVarWriteRequest& request);
     [[nodiscard]] CVarBatchResult QueueRequests(
         std::span<const CVarWriteRequest> requests,
         CVarCommandSource source);
     CVarEntry& EnsureEntryLocked(std::wstring_view name);
     [[nodiscard]] bool HasResolverWorkLocked() const;
-    void FailAllCommandsLocked(std::string_view reason);
+    [[nodiscard]] std::optional<std::chrono::steady_clock::time_point>
+    NearestDeadlineLocked() const;
+    void ArmUnarmedDeadlinesLocked(std::chrono::steady_clock::time_point now);
+    void FailAllCommandsLocked(
+        std::string_view reason,
+        std::vector<std::vector<IntReadCallback>>& callbackDiscard);
+    void TerminalizeLocked(
+        Cache::iterator entry,
+        std::string reason,
+        std::vector<Cache::node_type>& detachedEntries);
+    void SweepExpiredLocked(
+        std::chrono::steady_clock::time_point now,
+        std::vector<Cache::node_type>& detachedEntries);
 
     [[nodiscard]] std::expected<void, std::string> InvokeStringSetter(
         const ResolvedCVar& resolved,
-        std::wstring_view name,
         std::wstring_view value) const;
     void ProcessPendingCommands();
-    [[nodiscard]] std::optional<int32_t> ReadResolvedInt(
-        std::wstring_view name) const;
+    void ProcessPendingCommandForName(std::wstring_view name);
+    void ProcessPendingReads();
+    void ProcessStartupReconciliation(
+        std::chrono::steady_clock::time_point now);
+    [[nodiscard]] std::optional<int32_t> ReadResolvedValueWord(
+        const ResolvedCVar& resolved) const;
     [[nodiscard]] const ModuleInfo* GetOrFetchModule();
     void PerformInitialScan();
     void ResolvePendingCVars(const ModuleInfo& module);
     void ResolverLoop(std::chrono::milliseconds period);
     void FinishGameThreadPass() noexcept;
 
+#if defined(JST_UNIT_TESTS)
+    void RecordLifecycleAttemptForTest();
+    void RecordLifecycleEntryForTest();
+#endif
+
+    // Serializes lifecycle transactions and all resolver-thread ownership
+    // operations. Code that needs both mutexes always acquires this first.
+    std::mutex m_lifecycleMutex;
     mutable std::mutex m_mutex;
     std::condition_variable m_resolverCv;
     std::condition_variable m_stateCv;
@@ -231,23 +269,34 @@ private:
     std::unordered_set<std::wstring, CVarNameHash, CVarNameEqual>
         m_managedClaims;
     std::vector<std::wstring> m_needsInitialScan;
+    std::list<ReadyReadBatch> m_readyReadBatches;
     std::chrono::milliseconds m_pendingTimeout{30'000};
     uint64_t m_nextGeneration = 1;
     size_t m_activeGameThreadPasses = 0;
     CVarSystemState m_state = CVarSystemState::Stopped;
     bool m_gameThreadReady = false;
-    bool m_gameSettingsReady = false;
-    bool m_watchBarrierOpened = false;
     std::string m_unavailableReason;
 
     std::optional<ModuleInfo> m_module;
-    std::unique_ptr<CVarWatchRegistry> m_watches;
-    std::jthread m_resolverThread;
-    std::chrono::steady_clock::time_point m_nextWatchEvaluation{};
+    CVarStartupReconciler m_startupReconciler;
 
 #if defined(JST_UNIT_TESTS)
+    // Test-only sequencing/injection state for lifetime and allocation-failure
+    // coverage. None of this is present in production builds.
+    std::condition_variable m_testResolverCv;
+    bool m_testPauseResolverAfterModuleFetch = false;
+    bool m_testResolverPaused = false;
+    bool m_testStopBeforeResolverJoin = false;
+    std::optional<size_t> m_testResolvedReadDetachmentFailAfter;
+    size_t m_testLifecycleAttempts = 0;
+    size_t m_testLifecycleEntries = 0;
+
     friend class CVarSystemTestAccess;
 #endif
+
+    // Keep this last: reverse member destruction joins the resolver before the
+    // state it may still inspect is destroyed.
+    std::jthread m_resolverThread;
 };
 
 } // namespace jst::core

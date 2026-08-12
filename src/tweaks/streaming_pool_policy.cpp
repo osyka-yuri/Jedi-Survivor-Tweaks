@@ -15,8 +15,8 @@ namespace {
     // A decimal tenth of a binary GiB is fractional. Floor the remainder so
     // a configured/capture ceiling can never exceed the VRAM policy by a
     // handful of bytes due to float representation.
-    return (tenthSteps / 10) * jst::core::kBytesPerGiB +
-           (tenthSteps % 10) * jst::core::kBytesPerGiB / 10;
+    return (tenthSteps / 10) * kPoolSizeBytesPerGiB +
+           (tenthSteps % 10) * kPoolSizeBytesPerGiB / 10;
 }
 
 } // namespace
@@ -29,21 +29,21 @@ float PoolSizeLimits::MaximumGb() const noexcept {
     return PoolSizeBytesToGb(maximumBytes);
 }
 
-float PoolSizeLimits::FallbackGb() const noexcept {
-    return PoolSizeBytesToGb(fallbackBytes);
+float PoolSizeLimits::DefaultGb() const noexcept {
+    return PoolSizeBytesToGb(defaultBytes);
 }
 
 FloatSliderSpec MakePoolSizeSliderSpec(const PoolSizeLimits& limits) noexcept {
     return FloatSliderSpec{
         .min = limits.MinimumGb(),
         .max = limits.MaximumGb(),
-        .defaultValue = limits.FallbackGb(),
+        .defaultValue = limits.DefaultGb(),
         .step = kPoolSizeSliderStepGb,
     };
 }
 
 float NormalizePoolSizeGb(float gb, const PoolSizeLimits& limits) noexcept {
-    const float finite = std::isfinite(gb) ? gb : limits.FallbackGb();
+    const float finite = std::isfinite(gb) ? gb : limits.DefaultGb();
     return LoadSliderValue(finite, MakePoolSizeSliderSpec(limits));
 }
 
@@ -56,23 +56,23 @@ PoolSizePolicy MakePoolSizePolicy(
     // floor((70% * bytes) / 0.1 GiB) without overflowing bytes * 10.
     constexpr uint64_t kTenthsPerGiBAtLimit = kPoolSizeVramPercent / 10;
     static_assert(kPoolSizeVramPercent % 10 == 0);
-    const uint64_t wholeGiB = *dedicatedVideoMemoryBytes / jst::core::kBytesPerGiB;
-    const uint64_t remainder = *dedicatedVideoMemoryBytes % jst::core::kBytesPerGiB;
+    const uint64_t wholeGiB = *dedicatedVideoMemoryBytes / kPoolSizeBytesPerGiB;
+    const uint64_t remainder = *dedicatedVideoMemoryBytes % kPoolSizeBytesPerGiB;
     const uint64_t tenthSteps =
         wholeGiB * kTenthsPerGiBAtLimit +
-        remainder * kTenthsPerGiBAtLimit / jst::core::kBytesPerGiB;
+        remainder * kTenthsPerGiBAtLimit / kPoolSizeBytesPerGiB;
 
     const uint64_t maximumBytes = std::max(
-        jst::core::kStreamingPoolMinimumBytes,
+        kPoolSizeMinimumBytes,
         TenthsOfGiBToBytes(tenthSteps));
-    const uint64_t fallbackBytes = std::min(
-        jst::core::kStreamingPoolDefaultFallbackBytes, maximumBytes);
+    const uint64_t defaultBytes = std::min(
+        kPoolSizeManualDefaultBytes, maximumBytes);
 
     return PoolSizePolicy{
         .limits = PoolSizeLimits{
-            .minimumBytes = jst::core::kStreamingPoolMinimumBytes,
+            .minimumBytes = kPoolSizeMinimumBytes,
             .maximumBytes = maximumBytes,
-            .fallbackBytes = fallbackBytes,
+            .defaultBytes = defaultBytes,
         },
         .dedicatedVideoMemoryBytes = dedicatedVideoMemoryBytes,
     };
@@ -90,31 +90,12 @@ std::optional<uint64_t> EnginePoolMbToBytes(int32_t poolSizeMb) noexcept {
     if (poolSizeMb <= 0) {
         return std::nullopt;
     }
-    return static_cast<uint64_t>(poolSizeMb) * jst::core::kBytesPerMiB;
+    return static_cast<uint64_t>(poolSizeMb) * kPoolSizeBytesPerMiB;
 }
 
 float PoolSizeBytesToGb(uint64_t bytes) noexcept {
     return static_cast<float>(
-        static_cast<double>(bytes) / static_cast<double>(jst::core::kBytesPerGiB));
-}
-
-bool IsPoolSizeWithinLimits(uint64_t bytes, const PoolSizeLimits& limits) noexcept {
-    return bytes >= limits.minimumBytes && bytes <= limits.maximumBytes;
-}
-
-EnginePoolCandidateValidity ValidateEnginePoolMb(
-    int32_t poolSizeMb, const PoolSizeLimits& limits) noexcept {
-    const auto bytes = EnginePoolMbToBytes(poolSizeMb);
-    if (!bytes) {
-        return EnginePoolCandidateValidity::NotReady;
-    }
-    if (*bytes < limits.minimumBytes) {
-        return EnginePoolCandidateValidity::BelowMinimum;
-    }
-    if (*bytes > limits.maximumBytes) {
-        return EnginePoolCandidateValidity::AboveMaximum;
-    }
-    return EnginePoolCandidateValidity::Valid;
+        static_cast<double>(bytes) / static_cast<double>(kPoolSizeBytesPerGiB));
 }
 
 bool IsPoolSizeAutoLiteral(std::string_view raw) noexcept {
@@ -152,7 +133,7 @@ std::string FormatPoolSizeGb(const PoolSizeSetting& setting) {
     }
     const float finite = std::isfinite(setting.requestedManualGb)
         ? setting.requestedManualGb
-        : kPoolSizeDefaultFallbackGb;
+        : kPoolSizeDefaultGb;
     return std::format("{:.1f}", finite);
 }
 

@@ -15,7 +15,7 @@ extern "C" {
 #pragma warning(push)
 #pragma warning(disable: 4324)  // JstContext is padded due to alignas(16). The
                                 // Tail padding is intentional: the asm indexes
-                                // g_contexts with CONTEXT_SIZE=48 and every
+                                // g_contexts with CONTEXT_SIZE=32 and every
                                 // element must remain 16-byte aligned.
 struct alignas(16) JstContext {
     std::uintptr_t resumeAddress;  // [r11 + 0]  jumped to by `ret` in detours
@@ -23,7 +23,7 @@ struct alignas(16) JstContext {
     float          one;            // [r11 + 12] constant 1.0f -- used by the
                                    //            GameplayFOV detour to compute
                                    //            (multiplier - 1) via `subss`
-    // StreamingPoolFix protocol at [16..47].
+    // StreamingPoolFix protocol at [16..23].
     jst::core::StreamingPoolPayload streamingPool;
 };
 #pragma warning(pop)
@@ -31,7 +31,7 @@ struct alignas(16) JstContext {
 
 // Layout pins -- tweak_hooks.asm relies on every one of these. Any change to
 // the struct must be mirrored in the asm or the detours will read garbage.
-static_assert(sizeof(JstContext) == 48, "tweak_hooks.asm expects CONTEXT_SIZE EQU 48");
+static_assert(sizeof(JstContext) == 32, "tweak_hooks.asm expects CONTEXT_SIZE EQU 32");
 static_assert(alignof(JstContext) == 16, "tweak_hooks.asm assumes 16-byte alignment");
 static_assert(offsetof(JstContext, resumeAddress) == 0, "tweak_hooks.asm uses [r11 + 0]");
 static_assert(offsetof(JstContext, multiplier) == 8,         "tweak_hooks.asm uses [r11 + 8]");
@@ -40,9 +40,6 @@ static_assert(offsetof(JstContext, streamingPool) == 16,
               "tweak_hooks.asm expects StreamingPoolPayload at [r11 + 16]");
 static_assert(offsetof(JstContext, streamingPool) % alignof(uint64_t) == 0);
 static_assert(offsetof(jst::core::StreamingPoolPayload, forcedBytes) == 0);
-static_assert(offsetof(jst::core::StreamingPoolPayload, captureCeilingBytes) == 8);
-static_assert(offsetof(jst::core::StreamingPoolPayload, fallbackBytes) == 16);
-static_assert(offsetof(jst::core::StreamingPoolPayload, firstObservedEngineBytes) == 24);
 
 namespace jst::hooks {
 

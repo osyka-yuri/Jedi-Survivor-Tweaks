@@ -26,7 +26,7 @@ enum class GameThreadDispatcherState : uint8_t {
 /**
  * Executes engine-facing work after FEngineLoop::Tick returns on the game
  * thread. The first intercepted post-tick establishes the game-thread
- * identity; the CVar runtime owns its separate late-settings barrier.
+ * identity and admits queued CVar work.
  */
 class GameThreadDispatcher final {
 public:

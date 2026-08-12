@@ -159,10 +159,9 @@
     <ClCompile Include="src\core\memory_scanner.cpp" />
     <ClCompile Include="src\core\cvar_resolver.cpp" />
     <ClCompile Include="src\core\cvar_scanner.cpp" />
+    <ClCompile Include="src\core\cvar_startup_reconciler.cpp" />
     <ClCompile Include="src\core\cvar_system.cpp" />
     <ClCompile Include="src\core\cvar_runtime_coordinator.cpp" />
-    <ClCompile Include="src\core\cvar_watch_registry.cpp" />
-    <ClCompile Include="src\core\game_settings_barrier.cpp" />
     <ClCompile Include="src\core\game_thread_dispatcher.cpp" />
     <ClCompile Include="src\core\graphics_adapter_service.cpp" />
     <ClCompile Include="src\core\import_address_hook.cpp">
@@ -210,11 +209,9 @@
     <ClInclude Include="src\core\cvar_overrides.hpp" />
     <ClInclude Include="src\core\cvar_resolver.hpp" />
     <ClInclude Include="src\core\cvar_scanner.hpp" />
+    <ClInclude Include="src\core\cvar_startup_reconciler.hpp" />
     <ClInclude Include="src\core\cvar_system.hpp" />
     <ClInclude Include="src\core\cvar_runtime_coordinator.hpp" />
-    <ClInclude Include="src\core\cvar_watch.hpp" />
-    <ClInclude Include="src\core\cvar_watch_registry.hpp" />
-    <ClInclude Include="src\core\game_settings_barrier.hpp" />
     <ClInclude Include="src\core\game_thread_dispatcher.hpp" />
     <ClInclude Include="src\core\graphics_adapter_service.hpp" />
     <ClInclude Include="src\core\import_address_hook.hpp" />

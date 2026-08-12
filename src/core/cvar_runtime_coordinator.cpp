@@ -1,7 +1,6 @@
 #include "cvar_runtime_coordinator.hpp"
 
 #include "cvar_system.hpp"
-#include "game_settings_barrier.hpp"
 #include "game_thread_dispatcher.hpp"
 #include "hook_engine.hpp"
 #include "logging.hpp"
@@ -16,7 +15,6 @@ void CVarRuntimeCoordinator::Start(HookEngine& hooks) {
 
     auto& cvars = CVarSystem::Instance();
     auto& dispatcher = GameThreadDispatcher::Instance();
-    auto& settingsBarrier = GameSettingsBarrier::Instance();
     if (auto started = cvars.Start(); !started) {
         Fail(hooks, started.error());
         return;
@@ -32,12 +30,6 @@ void CVarRuntimeCoordinator::Start(HookEngine& hooks) {
         cvarSystem->OnGameThreadTick();
     });
 
-    auto barrierResult = settingsBarrier.RegisterHooks(hooks);
-    if (!barrierResult) {
-        Fail(hooks, barrierResult.error());
-        return;
-    }
-    m_settingsBarrierRegistered = true;
     m_available = true;
 }
 
@@ -50,10 +42,6 @@ void CVarRuntimeCoordinator::FinalizeResolution(HookEngine& hooks) {
         Fail(hooks, result.error());
         return;
     }
-    if (auto result = GameSettingsBarrier::Instance().FinalizeResolution(hooks);
-        !result) {
-        Fail(hooks, result.error());
-    }
 }
 
 void CVarRuntimeCoordinator::FinalizeInstallation(HookEngine& hooks) {
@@ -64,10 +52,6 @@ void CVarRuntimeCoordinator::FinalizeInstallation(HookEngine& hooks) {
     if (auto result = dispatcher.FinalizeInstallation(hooks); !result) {
         Fail(hooks, result.error());
         return;
-    }
-    if (auto result = GameSettingsBarrier::Instance().FinalizeInstallation(hooks);
-        !result) {
-        Fail(hooks, result.error());
     }
 }
 
@@ -98,26 +82,23 @@ void CVarRuntimeCoordinator::Fail(HookEngine& hooks, std::string reason) {
         reason += rollbackError;
     }
     GameThreadDispatcher::Instance().MarkUnavailable(reason);
-    GameSettingsBarrier::Instance().MarkUnavailable(reason);
     CVarSystem::Instance().MarkUnavailable(std::move(reason));
     m_available = false;
 }
 
 std::string CVarRuntimeCoordinator::RollbackHooks(HookEngine& hooks) {
-    std::string firstError;
-    auto settingsStopped = GameSettingsBarrier::Instance().ShutdownHooks(hooks);
-    if (settingsStopped) {
-        m_settingsBarrierRegistered = false;
-    } else {
-        firstError = settingsStopped.error();
+    auto& dispatcher = GameThreadDispatcher::Instance();
+    if (!m_dispatcherRegistered) {
+        dispatcher.Stop();
+        return {};
     }
-    auto dispatcherStopped = GameThreadDispatcher::Instance().ShutdownHook(hooks);
-    if (dispatcherStopped) {
-        m_dispatcherRegistered = false;
-    } else if (firstError.empty()) {
-        firstError = dispatcherStopped.error();
+
+    auto dispatcherStopped = dispatcher.ShutdownHook(hooks);
+    if (!dispatcherStopped) {
+        return dispatcherStopped.error();
     }
-    return firstError;
+    m_dispatcherRegistered = false;
+    return {};
 }
 
 } // namespace jst::core

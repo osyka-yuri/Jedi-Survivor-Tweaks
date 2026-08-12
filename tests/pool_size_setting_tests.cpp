@@ -10,7 +10,7 @@
 namespace {
 
 constexpr uint64_t GiB(uint64_t value) {
-    return value * jst::core::kBytesPerGiB;
+    return value * jst::tweaks::kPoolSizeBytesPerGiB;
 }
 
 } // namespace
@@ -27,14 +27,14 @@ void TestPoolSizeSetting() {
         const auto legacy = MakePoolSizePolicy(std::nullopt);
         Check(p24.HasDedicatedVideoMemory(), "24 GiB dedicated VRAM is retained");
         Check(NearlyEqual(p24.limits.MaximumGb(), 16.8f), "24 GiB -> 16.8 GiB maximum");
-        Check(NearlyEqual(p24.limits.FallbackGb(), 2.0f), "24 GiB fallback remains 2 GiB");
+        Check(NearlyEqual(p24.limits.DefaultGb(), 2.0f), "24 GiB default remains 2 GiB");
         Check(NearlyEqual(p8.limits.MaximumGb(), 5.6f), "8 GiB -> 5.6 GiB maximum");
         Check(NearlyEqual(p2.limits.MaximumGb(), 1.4f), "2 GiB -> 1.4 GiB maximum");
-        Check(NearlyEqual(p2.limits.FallbackGb(), 1.4f), "2 GiB fallback is policy-capped");
+        Check(NearlyEqual(p2.limits.DefaultGb(), 1.4f), "2 GiB default is policy-capped");
         Check(NearlyEqual(fractional.limits.MaximumGb(), 5.2f),
               "fractional VRAM is floored to the 0.1 GiB policy grid");
         Check(fractional.limits.maximumBytes ==
-                  52ull * jst::core::kBytesPerGiB / 10,
+                  52ull * kPoolSizeBytesPerGiB / 10,
               "fractional policy ceiling uses exact rational GiB bytes");
         Check(fractional.limits.maximumBytes <=
                   *fractional.dedicatedVideoMemoryBytes * 7 / 10,
@@ -46,11 +46,11 @@ void TestPoolSizeSetting() {
 
     // Even very small fixed VRAM cannot make the policy internally impossible.
     {
-        const auto tiny = MakePoolSizePolicy(256ull * jst::core::kBytesPerMiB);
+        const auto tiny = MakePoolSizePolicy(256ull * kPoolSizeBytesPerMiB);
         Check(NearlyEqual(tiny.limits.MinimumGb(), 0.5f) &&
                   NearlyEqual(tiny.limits.MaximumGb(), 0.5f) &&
-                  NearlyEqual(tiny.limits.FallbackGb(), 0.5f),
-              "minimum ceiling and fallback converge at 0.5 GiB");
+                  NearlyEqual(tiny.limits.DefaultGb(), 0.5f),
+              "minimum ceiling and default converge at 0.5 GiB");
     }
 
     Check(IsPoolSizeAutoLiteral("auto"), "auto literal is accepted");
@@ -83,28 +83,16 @@ void TestPoolSizeSetting() {
 
     // MiB/GiB conversions are binary and do not round an observed engine lock.
     {
-        Check(EnginePoolMbToBytes(1) == jst::core::kBytesPerMiB,
+        Check(EnginePoolMbToBytes(1) == kPoolSizeBytesPerMiB,
               "one engine MiB converts exactly to bytes");
-        Check(EnginePoolMbToBytes(3073) == 3073ull * jst::core::kBytesPerMiB,
+        Check(EnginePoolMbToBytes(3073) == 3073ull * kPoolSizeBytesPerMiB,
               "non-GiB engine value preserves every MiB");
         Check(!EnginePoolMbToBytes(0) && !EnginePoolMbToBytes(-1),
               "non-positive engine values are not ready");
-        Check(PoolSizeGbToBytes(2.0f) == 2ull * jst::core::kBytesPerGiB,
+        Check(PoolSizeGbToBytes(2.0f) == 2ull * kPoolSizeBytesPerGiB,
               "two configured GiB convert exactly to bytes");
-        Check(NearlyEqual(PoolSizeBytesToGb(1536ull * jst::core::kBytesPerMiB), 1.5f),
+        Check(NearlyEqual(PoolSizeBytesToGb(1536ull * kPoolSizeBytesPerMiB), 1.5f),
               "1536 MiB converts exactly to 1.5 GiB");
-    }
-
-    {
-        const auto limits = MakePoolSizePolicy(GiB(24)).limits;
-        Check(ValidateEnginePoolMb(0, limits) == EnginePoolCandidateValidity::NotReady,
-              "zero candidate is not ready");
-        Check(ValidateEnginePoolMb(100, limits) == EnginePoolCandidateValidity::BelowMinimum,
-              "candidate below 0.5 GiB is rejected");
-        Check(ValidateEnginePoolMb(3000, limits) == EnginePoolCandidateValidity::Valid,
-              "3000 MiB candidate is valid");
-        Check(ValidateEnginePoolMb(20'000, limits) == EnginePoolCandidateValidity::AboveMaximum,
-              "candidate above GPU policy is rejected");
     }
 
     {
@@ -131,10 +119,19 @@ void TestPoolSizeSetting() {
               "waiting status is reported");
         Check(waiting.find("holding 5.0 GB") != std::string::npos,
               "waiting status reports temporary hold size");
+
+        const auto fallback = FormatStreamingPoolStatus(StreamingPoolSnapshot{
+            .state = StreamingPoolState::AutomaticFallback,
+            .lockedBytes = 2ull * kPoolSizeBytesPerGiB,
+            .effectiveGb = 2.0f,
+            .policy = policy,
+        });
+        Check(fallback.find("Auto fallback: 2.00 GB") != std::string::npos,
+              "automatic fallback remains visibly automatic rather than manual");
     }
 
     Check(NearlyEqual(NormalizePoolSizeGb(
                           std::numeric_limits<float>::infinity()),
-                      kPoolSizeDefaultFallbackGb),
-          "non-finite runtime input normalizes to fallback");
+                      kPoolSizeDefaultGb),
+          "non-finite runtime input normalizes to the default");
 }

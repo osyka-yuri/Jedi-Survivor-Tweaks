@@ -7,7 +7,6 @@
 #include "runtime_control.hpp"
 #include "slider_utils.hpp"
 
-#include <chrono>
 #include <utility>
 
 namespace {
@@ -16,7 +15,6 @@ constexpr const char* kPattern =
     "40 E8 ?? ?? ?? ?? 48 8B 54 24 40 84 C0 74 16 48 8B 83 08 01 00 00 48 2B 44 24 48 48 03 C2 48 89";
 constexpr int32_t kOffset = 0x6;
 constexpr std::wstring_view kPoolSizeCVar = L"r.Streaming.PoolSize";
-constexpr std::chrono::milliseconds kAutoWatchTimeout{30'000};
 
 } // namespace
 
@@ -25,8 +23,8 @@ namespace jst::tweaks {
 StreamingPoolFix::StreamingPoolFix()
     : HookTweak(
           "StreamingPoolFix",
-          "Locks the streaming pool to a safe engine or manual size. "
-          "The maximum is 70% of detected dedicated GPU memory.",
+          "Locks the streaming pool to the engine-selected or configured size. "
+          "Manual values are capped at 70% of detected dedicated GPU memory.",
           true,
           HookTarget::Pattern(kPattern, kOffset, 16),
           reinterpret_cast<std::uintptr_t>(&StreamingPoolFix_Detour),
@@ -50,131 +48,80 @@ void StreamingPoolFix::WritePoolSizeGb(jst::core::Config& config) const {
     config.SetString(Name(), kPoolSizeGbConfigKey, FormatPoolSizeGb(m_setting));
 }
 
-void StreamingPoolFix::LogPolicy(const StreamingPoolSnapshot& snapshot) const {
+void StreamingPoolFix::LogPolicy(
+    const StreamingPoolSnapshot& snapshot) const {
     if (snapshot.policy.dedicatedVideoMemoryBytes) {
         JST_LOG_INFO(
-            "StreamingPoolFix | detected {:.1f} GB dedicated VRAM; "
-            "safe pool maximum {:.1f} GB (70%)",
+            "StreamingPoolFix | VRAM={:.1f} GB | manualMax={:.1f} GB.",
             PoolSizeBytesToGb(*snapshot.policy.dedicatedVideoMemoryBytes),
             snapshot.policy.limits.MaximumGb());
     } else {
         JST_LOG_WARNING(
-            "StreamingPoolFix | game GPU VRAM is unavailable; "
-            "using legacy 12.0 GB ceiling");
+            "StreamingPoolFix | VRAM=unavailable | manualMax=12.0 GB.");
     }
 }
 
-void StreamingPoolFix::LogAutoLock(const StreamingPoolSnapshot& snapshot) const {
-    if (snapshot.state == StreamingPoolState::LockedFromCVar) {
-        JST_LOG_INFO(
-            "StreamingPoolFix | auto locked at {:.2f} GB (engine-reported {} MB)",
-            snapshot.effectiveGb,
-            snapshot.enginePoolMb);
-    } else if (snapshot.state == StreamingPoolState::LockedFromPathSample) {
-        JST_LOG_INFO(
-            "StreamingPoolFix | auto locked at {:.2f} GB (streaming path)",
-            snapshot.effectiveGb);
+bool StreamingPoolFix::ReadAutomaticPoolSize(uint64_t generation) {
+    const bool queued = jst::core::CVarSystem::Instance().ReadIntOnce(
+        kPoolSizeCVar,
+        [this, generation](std::expected<int32_t, std::string> value) {
+            const auto completion = m_controller.CompleteAutoRead(generation, value);
+            if (completion.completion == StreamingPoolAutoCompletion::Stale) {
+                return;
+            }
+            if (completion.completion == StreamingPoolAutoCompletion::Exact) {
+                JST_LOG_INFO(
+                    "StreamingPoolFix | mode=auto | source=r.Streaming.PoolSize "
+                    "| value={} MB ({:.2f} GB) | result=locked.",
+                    completion.snapshot.enginePoolMb,
+                    completion.snapshot.effectiveGb);
+                return;
+            }
+            JST_LOG_WARNING(
+                "StreamingPoolFix | mode=auto | source=r.Streaming.PoolSize "
+                "| result=fallback | value=2.00 GB | reason='{}'.",
+                completion.diagnostic);
+        });
+    if (!queued) {
+        const auto completion = m_controller.CompleteAutoRead(
+            generation,
+            std::unexpected(std::string("CVar read request was rejected")));
+        if (completion.completion == StreamingPoolAutoCompletion::Fallback) {
+            JST_LOG_WARNING(
+                "StreamingPoolFix | mode=auto | source=r.Streaming.PoolSize "
+                "| result=fallback | value=2.00 GB | reason='{}'.",
+                completion.diagnostic);
+        }
     }
+    return queued;
 }
 
 void StreamingPoolFix::ApplySetting() {
-    StopEngineWatch();
-    m_lastLoggedRejectedEngineMb.store(0, std::memory_order_relaxed);
-
+    const uint64_t generation =
+        m_autoReadGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     if (m_setting.IsAuto()) {
-        m_controller.ArmAuto();
-        const auto snapshot = m_controller.Snapshot();
-        StartEngineWatch();
-        JST_LOG_INFO(
-            "StreamingPoolFix | auto: waiting for r.Streaming.PoolSize "
-            "(then path sample or {:.1f} GB fallback)",
-            snapshot.policy.limits.FallbackGb());
+        m_controller.ArmAuto(generation);
+        if (ReadAutomaticPoolSize(generation)) {
+            JST_LOG_INFO(
+                "StreamingPoolFix | mode=auto | source=r.Streaming.PoolSize | "
+                "result=queued for post-Tick read.");
+        }
         return;
     }
 
-    m_controller.ArmManual(m_setting.requestedManualGb);
+    m_controller.ArmManual(generation, m_setting.requestedManualGb);
     const auto snapshot = m_controller.Snapshot();
     if (SliderValuesNearlyEqual(
             snapshot.effectiveGb, m_setting.requestedManualGb)) {
-        JST_LOG_INFO("StreamingPoolFix | manual: {:.1f} GB", snapshot.effectiveGb);
-    } else {
         JST_LOG_INFO(
-            "StreamingPoolFix | manual: {:.1f} GB (requested {:.1f} GB)",
-            snapshot.effectiveGb,
-            m_setting.requestedManualGb);
-    }
-}
-
-void StreamingPoolFix::StartEngineWatch() {
-    jst::core::IntWatchRequest request;
-    request.name = std::wstring(kPoolSizeCVar);
-    request.timeout = kAutoWatchTimeout;
-    request.onValue = [this](int32_t value) {
-        // Priority: in-range CVar first, then first streaming-path sample.
-        // shouldAbort must not adopt the path sample before this runs (registry
-        // order is shouldAbort → timeout → onValue).
-        const auto observation = m_controller.ObserveEnginePoolMb(value);
-        switch (observation) {
-        case EnginePoolObservation::NotReady:
-            break;
-        case EnginePoolObservation::RejectedBelowMinimum:
-        case EnginePoolObservation::RejectedAboveMaximum: {
-            int32_t expected = m_lastLoggedRejectedEngineMb.load(std::memory_order_relaxed);
-            if (expected != value && m_lastLoggedRejectedEngineMb.compare_exchange_strong(
-                    expected, value, std::memory_order_relaxed)) {
-                const auto snapshot = m_controller.Snapshot();
-                JST_LOG_WARNING(
-                    "StreamingPoolFix | ignoring engine-reported {} MB: "
-                    "outside safe range {:.1f}-{:.1f} GB",
-                    value,
-                    snapshot.policy.limits.MinimumGb(),
-                    snapshot.policy.limits.MaximumGb());
-            }
-            break;
-        }
-        case EnginePoolObservation::LockedFromCVar:
-        case EnginePoolObservation::LockedFromPathSample:
-            LogAutoLock(m_controller.Snapshot());
-            return jst::core::CVarWatchDecision::Complete;
-        case EnginePoolObservation::Inactive:
-            return jst::core::CVarWatchDecision::Complete;
-        }
-
-        if (m_controller.TryAdoptPathSample()) {
-            LogAutoLock(m_controller.Snapshot());
-            return jst::core::CVarWatchDecision::Complete;
-        }
-        return jst::core::CVarWatchDecision::Continue;
-    };
-    request.onTimeout = [this] { OnEngineWatchTimeout(); };
-    request.shouldAbort = [this] {
-        return !m_controller.IsWaitingForEngine();
-    };
-
-    m_engineWatch = jst::core::CVarSystem::Instance().WatchInt(std::move(request));
-    if (!m_engineWatch) {
-        JST_LOG_WARNING(
-            "StreamingPoolFix | auto: engine CVar watch unavailable; "
-            "using path sample or fallback");
-        OnEngineWatchTimeout();
-    }
-}
-
-void StreamingPoolFix::StopEngineWatch() {
-    m_engineWatch.Reset();
-}
-
-void StreamingPoolFix::OnEngineWatchTimeout() {
-    m_controller.OnAutoTimeout();
-    const auto snapshot = m_controller.Snapshot();
-    if (snapshot.state == StreamingPoolState::Fallback) {
-        JST_LOG_WARNING(
-            "StreamingPoolFix | auto: engine pool size not ready within {}s; "
-            "falling back to {:.1f} GB",
-            kAutoWatchTimeout.count() / 1000,
+            "StreamingPoolFix | mode=manual | value={:.1f} GB | result=locked.",
             snapshot.effectiveGb);
     } else {
-        LogAutoLock(snapshot);
+        JST_LOG_INFO(
+            "StreamingPoolFix | mode=manual | requested={:.1f} GB | "
+            "value={:.1f} GB | result=capped.",
+            m_setting.requestedManualGb,
+            snapshot.effectiveGb);
     }
 }
 
@@ -200,9 +147,7 @@ StreamingPoolFix::FinalizeInstallation(jst::core::HookEngine& hooks) {
         MakePoolSizePolicy(adapterSnapshot.dedicatedVideoMemoryBytes));
     m_controller.BindPayload(PrimaryContext().streamingPool);
     ApplySetting();
-    if (adapterSnapshot.HasDedicatedVideoMemory()) {
-        LogPolicy(m_controller.Snapshot());
-    }
+    LogPolicy(m_controller.Snapshot());
 
     m_adapterSubscription = adapterService.Subscribe(
         [this](const jst::core::GraphicsAdapterSnapshot& snapshot) {
@@ -212,8 +157,8 @@ StreamingPoolFix::FinalizeInstallation(jst::core::HookEngine& hooks) {
 }
 
 void StreamingPoolFix::Shutdown() {
+    m_autoReadGeneration.fetch_add(1, std::memory_order_acq_rel);
     m_adapterSubscription.Reset();
-    StopEngineWatch();
     HookTweak::Shutdown();
 }
 
@@ -232,8 +177,6 @@ RuntimeControlResetResult StreamingPoolFix::ResetRuntimeControls(
     }
 
     if (IsEffectActive()) {
-        // Composite reset is a deliberate re-arm even when values were already
-        // defaults, so its watch and timeout restart from a known state.
         ApplySetting();
     }
     return changed
@@ -264,8 +207,8 @@ RuntimeControl StreamingPoolFix::MakeAutoCheckbox(std::string_view section) {
             },
         },
         .tooltip =
-            "Writes PoolSizeGB=auto when enabled. Prefers r.Streaming.PoolSize "
-            "when in range, else the first streaming-path sample, else fallback. "
+            "Writes PoolSizeGB=auto and locks the r.Streaming.PoolSize "
+            "value selected by the game. "
             "Manual mode uses the slider below.",
     };
 }
@@ -279,8 +222,7 @@ RuntimeControl StreamingPoolFix::MakeManualSlider(std::string_view section) {
         [this](float value) {
             m_setting.requestedManualGb = value;
             m_setting.mode = PoolSizeMode::Manual;
-            (void)m_controller.UpdateManualSize(value);
-            JST_LOG_INFO("StreamingPoolFix | manual: {:.1f} GB", value);
+            ApplySetting();
             return AppliedEdit();
         },
         "Pool Size (GB)",

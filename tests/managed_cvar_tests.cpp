@@ -21,8 +21,8 @@ void TestManagedCVars() {
     {
         CVarSystemTestAccess::Reset(cvars);
         const std::array invalidBatch{
-            CVarWriteRequest{.name = L"test.Valid", .value = L"1"},
-            CVarWriteRequest{.name = L"", .value = L"2"},
+            CVarWriteRequest{.name = L"test.Valid", .value = int32_t{1}},
+            CVarWriteRequest{.name = L"", .value = int32_t{2}},
         };
         const auto rejected = cvars.QueueBatch(invalidBatch);
         Check(!rejected.Accepted() &&
@@ -72,8 +72,8 @@ void TestManagedCVars() {
               "managed batch fakes inject");
 
         const std::array batch{
-            CVarWriteRequest{.name = L"test.Batch.First", .value = L"11"},
-            CVarWriteRequest{.name = L"test.Batch.Second", .value = L"22"},
+            CVarWriteRequest{.name = L"test.Batch.First", .value = int32_t{11}},
+            CVarWriteRequest{.name = L"test.Batch.Second", .value = int32_t{22}},
         };
         const auto queued = cvars.QueueBatch(batch);
         Check(queued.Accepted() && queued.commands.size() == 2,
@@ -87,8 +87,8 @@ void TestManagedCVars() {
               "managed batch tickets report each late setter result");
 
         const std::array lateFailureBatch{
-            CVarWriteRequest{.name = L"test.Batch.First", .value = L"33"},
-            CVarWriteRequest{.name = L"test.Batch.Second", .value = L"44"},
+            CVarWriteRequest{.name = L"test.Batch.First", .value = int32_t{33}},
+            CVarWriteRequest{.name = L"test.Batch.Second", .value = int32_t{44}},
         };
         const auto lateFailure = cvars.QueueBatch(lateFailureBatch);
         secondTable.slots[cvar_layout::kVtableSetString] = 0;

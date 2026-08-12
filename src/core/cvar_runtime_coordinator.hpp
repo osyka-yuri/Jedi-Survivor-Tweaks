@@ -9,9 +9,9 @@ class HookEngine;
 class CVarRuntimeCoordinatorTestAccess;
 #endif
 
-// Owns the service-hook lifecycle required by CVarSystem. Any phase failure
-// rolls back both service hook groups and fails CVar access closed without
-// affecting independent tweak hooks.
+// Owns the game-thread dispatcher required by CVarSystem. Any phase failure
+// removes that service hook and fails CVar access closed without affecting
+// independent tweak hooks.
 class CVarRuntimeCoordinator final {
 public:
     void Start(HookEngine& hooks);
@@ -29,7 +29,6 @@ private:
     bool m_started = false;
     bool m_available = false;
     bool m_dispatcherRegistered = false;
-    bool m_settingsBarrierRegistered = false;
 
 #if defined(JST_UNIT_TESTS)
     friend class CVarRuntimeCoordinatorTestAccess;

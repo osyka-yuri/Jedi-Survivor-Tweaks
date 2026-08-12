@@ -62,19 +62,15 @@ std::expected<void, std::string> GraphicalTweaks::Prepare(
     const std::array requests{
         jst::core::CVarWriteRequest{
             .name = std::wstring(kCVarSharpen),
-            .value = std::format(
-                L"{}",
-                m_sharpenEnabled ? m_sharpenStrength : 0.0f),
+            .value = m_sharpenEnabled ? m_sharpenStrength : 0.0f,
         },
         jst::core::CVarWriteRequest{
             .name = std::wstring(kCVarCAQuality),
-            .value = std::to_wstring(
-                m_caEnabled ? kCAQualityOn : kCAQualityOff),
+            .value = m_caEnabled ? kCAQualityOn : kCAQualityOff,
         },
         jst::core::CVarWriteRequest{
             .name = std::wstring(kCVarToneQuality),
-            .value = std::to_wstring(
-                m_vignetteEnabled ? kToneQualityOn : kToneQualityOff),
+            .value = m_vignetteEnabled ? kToneQualityOn : kToneQualityOff,
         },
     };
     auto batch = jst::core::CVarSystem::Instance().QueueBatch(requests);

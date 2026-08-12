@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-08-12
+
+### Fixed
+
+- **Streaming Pool Auto** now locks the exact pool size selected by the game. If the value cannot be read or is invalid, Auto uses a **2.00 GiB** fallback for the current session without changing the saved setting or switching to Manual.
+- Graphics and performance settings applied at startup are restored if the game overrides them during the first 15 seconds.
+
 ## [1.5.0] - 2026-08-03
 
 ### Added

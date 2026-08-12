@@ -10,9 +10,16 @@
 
 namespace jst::tweaks {
 
-inline constexpr float kPoolSizeDefaultFallbackGb = 2.0f;
+inline constexpr float kPoolSizeDefaultGb = 2.0f;
 inline constexpr float kPoolSizeSliderStepGb = 0.1f;
 inline constexpr uint64_t kPoolSizeVramPercent = 70;
+inline constexpr uint64_t kPoolSizeBytesPerMiB = 1ull << 20;
+inline constexpr uint64_t kPoolSizeBytesPerGiB = 1ull << 30;
+inline constexpr uint64_t kPoolSizeMinimumBytes = kPoolSizeBytesPerGiB / 2;
+inline constexpr uint64_t kPoolSizeLegacyCeilingBytes =
+    12ull * kPoolSizeBytesPerGiB;
+inline constexpr uint64_t kPoolSizeManualDefaultBytes =
+    2ull * kPoolSizeBytesPerGiB;
 
 inline constexpr std::string_view kPoolSizeAutoLiteral = "auto";
 inline constexpr std::string_view kPoolSizeGbConfigKey = "PoolSizeGB";
@@ -26,19 +33,19 @@ struct PoolSizeSetting {
     PoolSizeMode mode = PoolSizeMode::Auto;
     // Retained verbatim across auto/manual toggles. The active policy owns
     // normalization so a later, larger GPU limit can restore the request.
-    float requestedManualGb = kPoolSizeDefaultFallbackGb;
+    float requestedManualGb = kPoolSizeDefaultGb;
 
     [[nodiscard]] bool IsAuto() const noexcept { return mode == PoolSizeMode::Auto; }
 };
 
 struct PoolSizeLimits {
-    uint64_t minimumBytes = jst::core::kStreamingPoolMinimumBytes;
-    uint64_t maximumBytes = jst::core::kStreamingPoolLegacyCeilingBytes;
-    uint64_t fallbackBytes = jst::core::kStreamingPoolDefaultFallbackBytes;
+    uint64_t minimumBytes = kPoolSizeMinimumBytes;
+    uint64_t maximumBytes = kPoolSizeLegacyCeilingBytes;
+    uint64_t defaultBytes = kPoolSizeManualDefaultBytes;
 
     [[nodiscard]] float MinimumGb() const noexcept;
     [[nodiscard]] float MaximumGb() const noexcept;
-    [[nodiscard]] float FallbackGb() const noexcept;
+    [[nodiscard]] float DefaultGb() const noexcept;
 
     bool operator==(const PoolSizeLimits&) const = default;
 };
@@ -54,13 +61,6 @@ struct PoolSizePolicy {
     bool operator==(const PoolSizePolicy&) const = default;
 };
 
-enum class EnginePoolCandidateValidity : uint8_t {
-    NotReady,
-    BelowMinimum,
-    AboveMaximum,
-    Valid,
-};
-
 inline constexpr PoolSizeLimits kLegacyPoolSizeLimits{};
 
 [[nodiscard]] FloatSliderSpec MakePoolSizeSliderSpec(const PoolSizeLimits& limits) noexcept;
@@ -73,10 +73,6 @@ inline constexpr PoolSizeLimits kLegacyPoolSizeLimits{};
     float gb, const PoolSizeLimits& limits = kLegacyPoolSizeLimits) noexcept;
 [[nodiscard]] std::optional<uint64_t> EnginePoolMbToBytes(int32_t poolSizeMb) noexcept;
 [[nodiscard]] float PoolSizeBytesToGb(uint64_t bytes) noexcept;
-[[nodiscard]] EnginePoolCandidateValidity ValidateEnginePoolMb(
-    int32_t poolSizeMb, const PoolSizeLimits& limits = kLegacyPoolSizeLimits) noexcept;
-[[nodiscard]] bool IsPoolSizeWithinLimits(
-    uint64_t bytes, const PoolSizeLimits& limits = kLegacyPoolSizeLimits) noexcept;
 
 [[nodiscard]] bool IsPoolSizeAutoLiteral(std::string_view raw) noexcept;
 [[nodiscard]] PoolSizeSetting ParsePoolSizeGb(std::string_view raw) noexcept;
