@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-09-07
+
+### Added
+
+- **ReShade overlay log export** — added a **Copy Log to Clipboard** button and log status indicator in the overlay footer, making it easy to capture diagnostics even when disk access is restricted.
+
+### Fixed
+
+- **Startup in write-protected game directories** — failing to create `JediSurvivorTweaks.log` (e.g. when installed in `C:\Program Files` without administrator rights) no longer prevents the mod from loading. All tweaks and hooks now initialize normally using fallback in-memory logging.
+
 ## [1.5.1] - 2026-08-12
 
 ### Fixed
