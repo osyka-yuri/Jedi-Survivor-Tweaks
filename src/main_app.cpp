@@ -38,13 +38,18 @@ namespace {
 
 Application::Application(const fs::path& baseDir, LoaderVariant variant)
     : m_variant(variant) {
-    auto logPath = baseDir / "JediSurvivorTweaks.log";
-    if (!jst::core::Logger::Instance().Initialize(logPath)) {
-        return;
-    }
+    const auto logPath = baseDir / "JediSurvivorTweaks.log";
+    const bool logFileOpened = jst::core::Logger::Instance().Initialize(logPath);
+
     JST_LOG_INFO("Jedi Survivor Tweaks bootstrap started.");
     JST_LOG_INFO("Base directory: '{}'.", baseDir.string());
     JST_LOG_INFO("Loader variant: {}.", variant == LoaderVariant::Asi ? "ASI" : "ReShade Addon");
+    if (!logFileOpened) {
+        JST_LOG_WARNING(
+            "Game directory is write-protected or log file cannot be opened at '{}'. "
+            "File logging disabled; in-memory buffer and Windows debugger output remain active.",
+            logPath.string());
+    }
 
     // Both loader variants read and write the same JediSurvivorTweaks.ini.
     // The mod ships in two separate archives (ASI / ReShade), each with its

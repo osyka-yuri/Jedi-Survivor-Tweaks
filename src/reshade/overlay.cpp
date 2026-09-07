@@ -160,6 +160,20 @@ void DrawOverlay(::reshade::api::effect_runtime* /*runtime*/) {
         ImGui::TextDisabled("Config: %s", rc.GetPath().string().c_str());
         ImGui::PopTextWrapPos();
     }
+
+    const auto& logger = jst::core::Logger::Instance();
+    ImGui::PushTextWrapPos(0.0f);
+    if (logger.HasFileSink()) {
+        ImGui::TextDisabled("Log: %s", logger.GetLogPath().string().c_str());
+    } else {
+        ImGui::TextDisabled("Log: [In-memory only - log file could not be created]");
+    }
+    ImGui::PopTextWrapPos();
+
+    if (ImGui::Button("Copy Log to Clipboard", ImVec2(0, 0))) {
+        const auto dump = logger.DumpRecentEntries();
+        ImGui::SetClipboardText(dump.c_str());
+    }
 }
 
 } // namespace jst

@@ -1,11 +1,14 @@
 #pragma once
 
+#include <deque>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <mutex>
 #include <source_location>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace jst::core {
 
@@ -20,6 +23,8 @@ enum class LogLevel {
 
 class Logger final {
 public:
+    static constexpr size_t kMaxRingBufferEntries = 512;
+
     [[nodiscard]] static Logger& Instance();
 
     bool Initialize(const std::filesystem::path& path);
@@ -39,16 +44,25 @@ public:
     void               SetMinLevel(LogLevel level) noexcept { m_minLevel = level; }
     [[nodiscard]] LogLevel GetMinLevel() const noexcept    { return m_minLevel; }
 
+    [[nodiscard]] bool IsActive() const;
+    [[nodiscard]] bool HasFileSink() const;
+    [[nodiscard]] std::filesystem::path GetLogPath() const;
+    [[nodiscard]] std::string DumpRecentEntries() const;
+    [[nodiscard]] std::vector<std::string> GetRecentEntries() const;
+
 private:
     Logger() = default;
     ~Logger() = default;
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
 
-    std::ofstream m_file;
-    std::mutex    m_mutex;
-    bool          m_initialized = false;
-    LogLevel      m_minLevel = LogLevel::Info;
+    std::ofstream           m_file;
+    mutable std::mutex      m_mutex;
+    bool                    m_active = false;
+    bool                    m_hasFileSink = false;
+    std::filesystem::path   m_path;
+    std::deque<std::string> m_ringBuffer;
+    LogLevel                m_minLevel = LogLevel::Info;
 };
 
 // Macros pre-filter on the configured min-level to avoid constructing format

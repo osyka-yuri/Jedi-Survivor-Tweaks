@@ -21,8 +21,10 @@ void TestTweakManager();
 void TestGraphicsAdapterService();
 void TestImportAddressHook();
 void TestPeImports();
+void TestLogging();
 
 int main() {
+    TestLogging();
     // Coordinator rollback registers real hooks and therefore must run before
     // the hook-engine suite seals the process-lifetime gateway arena.
     TestCVarRuntimeCoordinator();

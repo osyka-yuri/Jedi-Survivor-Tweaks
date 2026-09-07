@@ -51,6 +51,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="test_main.cpp" />
+    <ClCompile Include="logging_tests.cpp" />
     <ClCompile Include="hook_engine_tests.cpp" />
     <ClCompile Include="config_tests.cpp" />
     <ClCompile Include="custom_cvar_value_tests.cpp" />
