@@ -4,10 +4,15 @@
   <p>One lightweight Windows mod, available as an ASI plugin or a ReShade add-on with live controls.</p>
   <h3><a href="https://github.com/osyka-yuri/Jedi-Survivor-Tweaks/releases/latest">Download the latest release</a></h3>
   <p>
+    <a href="docs/user/installation.md">Installation guide</a>
+    · <a href="https://github.com/osyka-yuri/Jedi-Survivor-Tweaks/releases">All releases</a>
+  </p>
+  <p>
     <a href="https://github.com/osyka-yuri/Jedi-Survivor-Tweaks/releases"><img src="https://img.shields.io/github/v/release/osyka-yuri/Jedi-Survivor-Tweaks?display_name=tag&sort=semver&style=flat-square" alt="Latest release"></a>
     <img src="https://img.shields.io/badge/Windows-x64-0078d4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-4a9eff?style=flat-square" alt="MIT license"></a>
   </p>
+  <p>Official downloads are published only through GitHub Releases.</p>
 </div>
 
 ## What it improves
@@ -53,10 +58,9 @@ See [Troubleshooting and removal](docs/user/troubleshooting.md) if the mod does 
 
 - [User guide](docs/README.md#user-guide) — installation, configuration, overlay behavior, troubleshooting, updates, and removal.
 - [Developer guide](docs/README.md#developer-guide) — build setup, architecture, compatibility checks, tests, and release quality gates.
-- [Changelog](CHANGELOG.md) — user-visible changes by release.
-- [Issues](https://github.com/osyka-yuri/Jedi-Survivor-Tweaks/issues) — bug reports and feature requests.
+- [Contributing](CONTRIBUTING.md) — the shortest path from a local checkout to a reviewable change.
+- [Issues](https://github.com/osyka-yuri/Jedi-Survivor-Tweaks/issues) and [changelog](CHANGELOG.md) — report problems and review release history.
+- [Support development on Boosty](https://boosty.to/osyka.yuri/donate) — an optional way to support the project.
 - [MIT license](LICENSE) — terms for using, modifying, and distributing the project.
 
-## Support
-
-If Jedi Survivor Tweaks improves your experience, you can optionally [support development on Boosty](https://boosty.to/osyka.yuri/donate).
+For installation and update safety, download Jedi Survivor Tweaks only from this repository's GitHub Releases page. ReShade, Ultimate ASI Loader, and the game remain independent third-party software subject to their own licenses and support policies.

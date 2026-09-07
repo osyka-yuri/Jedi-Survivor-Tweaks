@@ -1,6 +1,6 @@
 # Jedi Survivor Tweaks documentation
 
-Use the user guide when installing a release or changing settings. Use the developer guide when building from source, changing runtime contracts, or preparing a release.
+This directory is the documentation hub for Jedi Survivor Tweaks. Start with the user guide if you installed a release or want to change settings. Use the developer guide when building from source, changing runtime contracts, or preparing a release.
 
 ## User guide
 

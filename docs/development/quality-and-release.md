@@ -9,6 +9,9 @@ Run from a Visual Studio Developer PowerShell:
 ```powershell
 git diff --check
 
+npm ci
+npm run docs:check
+
 msbuild JediSurvivorTweaks.sln /p:Configuration=Debug /p:Platform=x64 /t:Rebuild
 & .\x64\Debug\tests\JediSurvivorTweaks.Tests.exe
 
@@ -19,7 +22,7 @@ msbuild JediSurvivorTweaks.sln /p:Configuration=ReleaseAddon /p:Platform=x64 /t:
 & .\x64\ReleaseAddon\tests\JediSurvivorTweaks.Tests.exe
 ```
 
-All three rebuilds must finish with zero first-party warnings. Every matching test executable must pass. Concurrency tests use bounded synchronization and must never rely on unbounded busy-wait loops.
+The documentation gate enforces the shared Markdown style and validates local paths, path casing, heading anchors, and image alternative text. All three rebuilds must finish with zero first-party warnings. Every matching test executable must pass. Concurrency tests use bounded synchronization and must never rely on unbounded busy-wait loops.
 
 Review `git status`, `git diff --stat`, and `git diff --check` before committing. Do not include generated binaries, local logs, game files, or unrelated line-ending changes.
 
@@ -52,11 +55,12 @@ Document that runtime behavior is unconfirmed whenever this smoke-test was not p
 - The root README explains the product, editions, shortest installation path, compatibility expectations, and documentation links.
 - User guides explain observable behavior and decisions without implementation internals.
 - Developer guides preserve architecture and verification contracts.
+- `npm run docs:check` must pass for the root README, contributing guide, and every page under `docs/`.
 - The changelog records user-visible additions, changes, fixes, compatibility notes, and only the maintenance details contributors need to act on.
 - The shipped INI stays concise enough to edit in place; extended rationale belongs in the configuration guide.
 
 ## CI and packaging
 
-The CI matrix rebuilds and tests `Release|x64` and `ReleaseAddon|x64`. Release packaging keeps ASI and ReShade archives separate, each with its matching plugin and the shared default INI.
+CI validates the documentation once, then the Windows matrix rebuilds and tests `Release|x64` and `ReleaseAddon|x64`. The release workflow repeats the documentation gate before packaging. Release packaging keeps ASI and ReShade archives separate, each with its matching plugin and the shared default INI.
 
 Release notes should call out loader requirements, game-build compatibility, new defaults, changed INI keys, and any behavior that cannot be reverted during the current process.

@@ -1,0 +1,13 @@
+{
+  "name": "jedi-survivor-tweaks-documentation",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "docs:check": "markdownlint-cli2 --config .markdownlint-cli2.jsonc README.md CONTRIBUTING.md \"docs/**/*.md\" && node --test scripts/check-docs.test.mjs && node scripts/check-docs.mjs"
+  },
+  "devDependencies": {
+    "markdownlint-cli2": "0.23.2"
+  }
+}

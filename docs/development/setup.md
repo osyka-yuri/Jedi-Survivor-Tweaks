@@ -8,6 +8,7 @@ Jedi Survivor Tweaks is a Windows x64 C++23 project with MASM hook stubs. Visual
 - Platform toolset v145 as configured by the project; v143 remains compatible when selected locally
 - C++ latest language mode
 - PowerShell for generated hook slots and compatibility scripts
+- Node.js 24 and npm for documentation validation
 
 Run builds from a Visual Studio Developer PowerShell, or invoke the installed `MSBuild.exe` directly.
 
