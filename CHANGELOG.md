@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-27
+
+### Added
+
+- **Depth of Field and Motion Blur** — added `[DepthOfField] Enabled` and `[MotionBlur] Enabled` settings and ReShade switches. Both are on by default.
+- **Film Grain** — added `[FilmGrain] Enabled` and a ReShade switch. It is off by default. Vignette must be on for Film Grain to take effect; the chosen Film Grain setting is remembered while Vignette is off. Some scenes may still show no visible grain.
+
+### Fixed
+
+- **ReShade graphics controls** — a change that fails immediately no longer affects subsequent edits.
+
 ## [1.5.2] - 2026-09-07
 
 ### Added
