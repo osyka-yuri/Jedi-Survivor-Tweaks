@@ -12,15 +12,20 @@ The ASI version reads the file at startup. The ReShade version also exposes supp
 | `AspectRatioUIFix` | Off | `Multiplier = 0.9` | Corrects oversized UI on 16:10 displays; `1.0` leaves the original scale unchanged. |
 | `GameplayFOV` | Off | `Multiplier = 1.0` | Changes gameplay field of view. |
 | `CameraDistance` | Off | `Multiplier = 1.0` | Moves the gameplay camera closer or farther away. |
-| `GraphicalTweaks` | On | `Enabled` | Applies the configured sharpening, chromatic aberration, and vignette values at startup. When off, startup leaves all three game values untouched. |
+| `GraphicalTweaks` | On | `Enabled` | Applies the configured graphics values at startup. When off, startup leaves all five managed game values untouched. |
 | `Sharpening` | On | `Strength = 1.0` | Controls sharpening from `0.0` to `10.0`; use `0.0` to remove it. |
 | `ChromaticAberration` | Off | `Enabled` | Enables or disables chromatic aberration. |
 | `Vignette` | On | `Enabled` | Enables or disables vignette. |
+| `DepthOfField` | On | `Enabled` | Enables or disables depth of field. |
+| `MotionBlur` | On | `Enabled` | Enables or disables motion blur. |
+| `FilmGrain` | Off | `Enabled` | Allows the engine film-grain pass while Vignette is on; scene settings can still suppress visible grain. |
 | `InterpolatedRendering` | Off | `Enabled` | Opt-in frame interpolation intended to reduce CPU stutter and camera jitter. |
 | `StreamingPoolFix` | On | `PoolSizeGB = auto` | Stabilizes the texture streaming pool to help prevent runaway VRAM usage. |
 | `MaxFPS` | Off | `TargetFPS = 60` | Applies a frame-rate limit from `0` to `300`; `0` means uncapped. |
 
 Multiplier controls accept values from `0.0` to `10.0`, except `AspectRatioUIFix`, which accepts `0.5` to `1.5`. Values outside documented ranges fall back to safe defaults and are reported in the log.
+
+Vignette and Film Grain share `r.Tonemapper.Quality`. Vignette off selects quality `1`, which suppresses both effects. With Vignette on, Film Grain off selects `3` (vignette retained, grain suppressed), while Film Grain on selects `5` (vignette retained, engine grain pass allowed). Game scene settings can still suppress visible grain. The Film Grain preference stays saved while Vignette is off and takes effect if Vignette is enabled later.
 
 ## Streaming pool
 

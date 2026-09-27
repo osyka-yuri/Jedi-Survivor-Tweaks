@@ -19,7 +19,7 @@
 
 - **Ultrawide and 16:10 presentation** — removes cutscene black bars and corrects oversized interface elements on 16:10 displays.
 - **Camera control** — adjusts gameplay field of view and camera distance.
-- **Cleaner image options** — controls sharpening, chromatic aberration, and vignette.
+- **Graphics options** — controls sharpening, chromatic aberration, vignette, depth of field, motion blur, and whether the engine film-grain pass is allowed.
 - **Performance tuning** — limits frame rate, offers opt-in interpolated rendering, and stabilizes the streaming pool to help prevent runaway VRAM usage.
 - **Advanced customization** — applies additional numeric Unreal Engine settings from the configuration file.
 - **Live tuning with ReShade** — changes supported settings in game and saves them automatically.

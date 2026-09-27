@@ -4,6 +4,7 @@
 #include "tweak.hpp"
 
 #include <array>
+#include <cstddef>
 
 namespace jst::tweaks {
 
@@ -13,7 +14,8 @@ public:
         return "GraphicalTweaks";
     }
     [[nodiscard]] std::string_view Description() const noexcept override {
-        return "Controls sharpening, chromatic aberration, and vignetting settings.";
+        return "Controls sharpening, chromatic aberration, vignette, depth of "
+               "field, motion blur, and film grain.";
     }
     [[nodiscard]] bool IsEnabledByDefault() const noexcept override {
         return true;
@@ -30,11 +32,28 @@ public:
         const override;
 
 private:
+    enum class TicketSlot : std::size_t {
+        Sharpening,
+        ChromaticAberration,
+        Tonemapper,
+        DepthOfField,
+        MotionBlur,
+        Count,
+    };
+    [[nodiscard]] static constexpr std::size_t ToIndex(
+        TicketSlot slot) noexcept {
+        return static_cast<std::size_t>(slot);
+    }
+
     bool m_sharpenEnabled = false;
     float m_sharpenStrength = 1.0f;
     bool m_caEnabled = false;
     bool m_vignetteEnabled = false;
-    std::array<jst::core::CVarCommandTicket, 3> m_tickets;
+    bool m_depthOfFieldEnabled = false;
+    bool m_motionBlurEnabled = false;
+    bool m_filmGrainEnabled = false;
+    std::array<jst::core::CVarCommandTicket,
+               static_cast<std::size_t>(TicketSlot::Count)> m_tickets;
 };
 
 } // namespace jst::tweaks

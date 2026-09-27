@@ -43,7 +43,7 @@ Specialized controls claim the CVar names they manage for the current process. A
 
 MaxFPS uses the same one-shot, latest-value-wins command path as other CVar settings. Startup enable queues the selected target for the first post-Tick pass and participates in the bounded startup reconciliation window. Live target changes use the normal next-post-Tick path, and live disable queues `0` (uncapped). Startup disable and process shutdown perform no engine write.
 
-`GraphicalTweaks.Enabled = false` is also neutral at startup: it queues no sharpening, chromatic-aberration, or tonemapper writes. ReShade may still issue an individual managed command when the user explicitly edits one of those live controls.
+`GraphicalTweaks.Enabled = false` is also neutral at startup: it queues no sharpening, chromatic-aberration, tonemapper, depth-of-field, or motion-blur writes. Vignette and Film Grain share one `r.Tonemapper.Quality` value: `1` disables vignette, `3` retains vignette while suppressing grain, and `5` allows the engine grain pass. Live edits use the combined desired state and update the shared ticket only when the CVar command is accepted.
 
 ## Streaming pool startup
 
